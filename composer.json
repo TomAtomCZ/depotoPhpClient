@@ -1,6 +1,12 @@
 {
+    "name": "tomatom/depoto-php-client",
+    "autoload": {
+        "psr-4": {"Depoto\\": "src/"},
+        "psr-0": {"Depoto\\": "src/"}
+    },
     "require": {
         "guzzlehttp/guzzle": "^6.2",
-        "himik/graphql-api-client": "^0.2.3"
+        "himik/graphql-api-client": "^0.2.3",
+        "phpunit/phpunit": "^6.0"
     }
 }
