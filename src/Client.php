@@ -3,8 +3,8 @@
 namespace Depoto;
 
 use Exception;
-use QueryBuilder\Mutation\MutationBuilder;
-use QueryBuilder\Query\QueryBuilder;
+use Depoto\GraphQL\MutationBuilder;
+use Depoto\GraphQL\QueryBuilder;
 use function GuzzleHttp\json_decode;
 use function GuzzleHttp\json_encode;
 
@@ -58,7 +58,7 @@ class Client
             'headers' => [
                 'Authorization' => 'Bearer ' . $this->accessToken,
                 'Accept' => 'application/json', 
-                'Content-type' => 'application/json',
+                'Content-type' => 'application/json; charset=utf-8',
             ],
             //'debug' => true
         ]);
@@ -92,7 +92,7 @@ class Client
             'headers' => [
                 'Authorization' => 'Bearer ' . $this->accessToken,
                 'Accept' => 'application/json', 
-                'Content-type' => 'application/json',
+                'Content-type' => 'application/json; charset=utf-8',
             ],
             //'debug' => true
         ]);
