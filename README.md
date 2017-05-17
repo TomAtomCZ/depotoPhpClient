@@ -1,7 +1,7 @@
 # Depoto Php Client
 
 ## Použití
-```
+```php
 $client = new \Depoto\Client('username', 'password', 'https://server1.depoto.cz');
 
 // Vytvoření účtenky
@@ -27,4 +27,26 @@ $client->sendEetReceipt($id);
 
 // Výpis účtenek
 $client->getEetReceipts($page = 1, $sort = 'id', $direction = 'asc', $filters = []);
+```
+
+## Použití s vlastní query / mutací
+
+#### úvod do GraphQL
+
+* [GraphQL dokumentace](http://graphql.org/learn/)
+
+#### přehled Depoto API
+
+* [nástroj pro zobrazení GraphQL endpointu + testování (GraphiQL / ChromeiQL)](https://chrome.google.com/webstore/detail/chromeiql/fkkiamalmpiidkljmicmjfbieiclmeij)
+
+* [Depoto root schema url](https://server1.depoto.cz/graphql)
+
+
+```php
+$client = new \Depoto\Client('username', 'password', 'https://server1.depoto.cz');
+
+$schema = ['id', 'name'];
+$result = $client->query('queryName', 
+        ['arg1' => $arg1, 'arg2' => $arg2],
+        ['returnSchema' => $schema]);
 ```
