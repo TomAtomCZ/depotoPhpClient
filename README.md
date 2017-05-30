@@ -50,3 +50,7 @@ $result = $client->query('queryName',
         ['arg1' => $arg1, 'arg2' => $arg2],
         ['returnSchema' => $schema]);
 ```
+
+#### Zakladni prehled
+
+* [Informace o zakladnich API metodach](./API_BASICS.md)
