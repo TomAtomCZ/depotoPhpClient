@@ -13,14 +13,14 @@
 
 > tento dokument slouzi pro rychle seznameni se zakladnimi principy
 >
-> **pro vsechny aktualni metody Depoto API a jejich specifikaci prejdete na generovane [schema](https://server1.depoto.cz/graphql)**
+> **pro vsechny aktualni metody Depoto API a jejich specifikaci prejdete na generovane [schema](https://server1.depoto.cz/graphql)** (zobrazitelne napr. prostrednictvim ChromeiQLu)
 
 
 ## Zakladni nastaveni
 
 > **veskere kroky - jsou-li pro vas jednorazove - je mozne take naklikat v [Depoto Client](https://client.depoto.cz) aplikaci**
 
-> nasledujici query a mutace lze primo testovat napr. zkopirovanim do ChromeiQLu*
+> nasledujici query a mutace lze primo testovat napr. zkopirovanim do ChromeiQLu
 
 * je treba zalozit **vyrobce** (vrati **id zalozeneho vyrobce**):
 ```
@@ -337,6 +337,39 @@ mutation {deleteReservation(
 }}
 ```
 
+## Priklad zalozeni produktu pomoci DepotoPhpClient
+
+```php
+$client = new \Depoto\Client('username', 'password', 'https://server1.depoto.cz');
+$result = $client->mutation('createProduct',
+        [
+            'name' => 'productNameFoo',
+            'producer' => 31,                # vyrobce s id 31 musi byt vytvoren drive
+            'vat' => 31,                     # dan s id 31 musi byt vytvorena drive
+            'ean' => '12345678ASDF',
+            'code' => '12345678ASDF',
+            'sellPrice' => 1234,
+            'enabled' => true,
+        ], [
+            'returnSchema' => [
+                'data' => [
+                    'id',
+                    'name',
+                    'fullName',
+                    'ean',
+                    'code',
+                    'sellPrice',
+                    'enabled',
+                    'producer' => ['id', 'name'],
+                    'vat' => ['id', 'name'],
+                ],
+                'errors',
+            ]
+        ]);
+$exit(var_dump($result));   # $result === returnSchema 
+```
+
+
 > tento dokument slouzi pro rychle seznameni se zakladnimi principy
 >
-> **pro vsechny aktualni metody Depoto API a jejich specifikaci prejdete na generovane [schema](https://server1.depoto.cz/graphql)**
+> **pro vsechny aktualni metody Depoto API a jejich specifikaci prejdete na generovane [schema](https://server1.depoto.cz/graphql)** (zobrazitelne napr. prostrednictvim ChromeiQLu)
