@@ -18,7 +18,7 @@
 
 ## Zakladni nastaveni
 
-> **veskere kroky - jsou-li pro vas jednorazove - je mozne take naklikat v [Depoto Client](https://client.depoto.cz) aplikaci**
+> **veskere kroky - jsou-li pro vas jednorazove - [je mozne take naklikat](./CLIENT_COMPANY_SETUP.md) v [Depoto Client](https://client.depoto.cz) aplikaci**
 
 > nasledujici query a mutace lze primo testovat napr. zkopirovanim do ChromeiQLu
 
