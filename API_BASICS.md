@@ -350,23 +350,21 @@ $result = $client->mutation('createProduct',
             'code' => '12345678ASDF',
             'sellPrice' => 1234,
             'enabled' => true,
-        ], [
-            'returnSchema' => [
-                'data' => [
-                    'id',
-                    'name',
-                    'fullName',
-                    'ean',
-                    'code',
-                    'sellPrice',
-                    'enabled',
-                    'producer' => ['id', 'name'],
-                    'vat' => ['id', 'name'],
-                ],
-                'errors',
-            ]
+        ], [                                 # returnSchema
+            'data' => [
+                'id',
+                'name',
+                'fullName',
+                'ean',
+                'code',
+                'sellPrice',
+                'enabled',
+                'producer' => ['id', 'name'],
+                'vat' => ['id', 'name'],
+            ],
+            'errors',
         ]);
-$exit(var_dump($result));   # $result === returnSchema 
+exit(var_dump($result));   # $result === returnSchema 
 ```
 
 
