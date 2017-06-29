@@ -161,11 +161,12 @@ mutation {createProductMovePack(
   note: "multiline poznamka"        # poznamka
   moves: [                          # pohyby
     {
-        product: { product id }             # id produktu
+        product: { product id }             # id produktu (povinne)
         # depotFrom: { depot id }           # ze skladu (id) - pri typu "out" a "transfer"
         depotTo: { depot id }               # na sklad (id) - pri typu "in" a "transfer"
         # productDepot: { productDepot id } # konkretni skladova zasoba (id) - pri typu "out" a "transfer"
-        supplier: { supplier id }           # id dodavatele
+        supplier: { supplier id }           # id dodavatele (povinne)
+        amount: 123                         # pocet naskladnenych kusu (povinne)
         purchasePrice: 123                  # nakupni cena
         note: "multiline poznamka"          # poznamka
     }
