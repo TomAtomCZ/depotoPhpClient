@@ -17,6 +17,8 @@ class Client
     protected $password;
     protected $clientId;
     protected $clientSecret;
+    
+    protected $vats = null;
 
     /**
      *
@@ -130,6 +132,35 @@ class Client
 
         $res = json_decode((string)$res->getBody(), true);
         $this->accessToken = $res['access_token'];
+    }
+    
+    /**
+     * @param float $percent
+     * @param bool $create
+     * @return mixed|null
+     * @throws Exception
+     */
+    public function getVatIdByPercent(float $percent, $create = true)
+    {
+        if($this->vats == null) {
+            $res = $this->query('vats',
+                [],
+                ['items' => ['id', 'percent']]);
+
+            foreach($res['items'] as $r) {
+                $this->vats[(float) $r['percent']] = $r['id'];
+            }
+        }
+
+        if(!isset($this->vats[$percent]) && $create) {
+            $res = $this->mutation('createVat',
+                ['name' => $percent, 'percent' => (float)$percent, 'default' => false],
+                ['data' => ['id', 'percent'], 'errors']);
+
+            $this->vats[(float) $res['percent']] = $res['id'];
+        }
+
+        return isset($this->vats[$percent]) ? $this->vats[$percent] : null;
     }
     
     /**
