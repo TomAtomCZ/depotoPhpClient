@@ -2,44 +2,101 @@
 
 namespace Depoto;
 
-use Exception;
 use Depoto\GraphQL\MutationBuilder;
 use Depoto\GraphQL\QueryBuilder;
-use function GuzzleHttp\json_decode;
-use function GuzzleHttp\json_encode;
+use Psr\Http\Client\ClientInterface;
+use Psr\Http\Message\RequestFactoryInterface;
+use Psr\Http\Message\StreamFactoryInterface;
+use Psr\Log\LoggerInterface;
 
 class Client
 {
-    protected $guzzle;
-    protected $accessToken;
-    protected $baseUrl;
-    protected $username;
-    protected $password;
-    protected $clientId;
-    protected $clientSecret;
+    protected string $username;
+    protected string $password;
+    protected string $baseUrl = 'https://server1.depoto.cz.tomatomstage.cz';
+    protected string $clientId = '1_2rw1go4w8igw84g0ko488cs8c0ws4ccc8sgsc8ckgoo48ccco8';
+    protected string $clientSecret = '3lvk182vjscgcs4ws44sks88skgkowoc00ow084soc0oc0gg88';
+    protected string $accessToken;
+    protected ClientInterface $httpClient;
+    protected RequestFactoryInterface $requestFactory;
+    protected StreamFactoryInterface $streamFactory;
+    protected LoggerInterface $logger;
 
-    /**
-     *
-     * @param string $username
-     * @param string $password
-     * @param string $baseUrl
-     * @param string $clientId
-     * @param string $clientSecret
-     */
-    public function __construct($username, $password, 
-        $baseUrl = 'https://server1.depoto.cz.tomatomstage.cz',
-        $clientId = '1_2rw1go4w8igw84g0ko488cs8c0ws4ccc8sgsc8ckgoo48ccco8',
-        $clientSecret = '3lvk182vjscgcs4ws44sks88skgkowoc00ow084soc0oc0gg88'
-        )
+    public function __construct(ClientInterface $httpClient,
+                                RequestFactoryInterface $requestFactory,
+                                StreamFactoryInterface $streamFactory,
+                                LoggerInterface $logger)
+    {
+        $this->httpClient = $httpClient;
+        $this->requestFactory = $requestFactory;
+        $this->streamFactory = $streamFactory;
+        $this->logger = $logger;
+    }
+
+    public function setUsername(string $username): self
     {
         $this->username = $username;
-        $this->password = $password;
-        $this->baseUrl = $baseUrl;
-        $this->clientId = $clientId;
-        $this->clientSecret = $clientSecret;
+        return $this;
+    }
 
-        $this->guzzle = new \GuzzleHttp\Client();
-        $this->authenticate();
+    public function getUsername(): string
+    {
+        return $this->username;
+    }
+
+    public function setPassword(string $password): self
+    {
+        $this->password = $password;
+        return $this;
+    }
+
+    public function getPassword(): string
+    {
+        return $this->password;
+    }
+
+    public function setBaseUrl(string $baseUrl): self
+    {
+        $this->baseUrl = $baseUrl;
+        return $this;
+    }
+
+    public function getBaseUrl(): string
+    {
+        return $this->baseUrl;
+    }
+
+    public function setClientId(string $clientId): self
+    {
+        $this->clientId = $clientId;
+        return $this;
+    }
+
+    public function getClientId(): string
+    {
+        return $this->clientId;
+    }
+
+    public function setClientSecret(string $clientSecret): self
+    {
+        $this->clientSecret = $clientSecret;
+        return $this;
+    }
+
+    public function getClientSecret(): string
+    {
+        return $this->clientSecret;
+    }
+
+    protected function setAccessToken(string $accessToken): self
+    {
+        $this->accessToken = $accessToken;
+        return $this;
+    }
+
+    protected function getAccessToken(): string
+    {
+        return $this->accessToken;
     }
 
     public function mutation($method, $data, $query)
@@ -51,73 +108,97 @@ class Client
             ->body($query)
             ->build();
 
-        $res = $this->guzzle->request('POST', $this->getEndpoint('/graphql'), [
-            'json' => [
-                'query' => $readyQuery,
-            ],
-            'headers' => [
-                'Authorization' => 'Bearer ' . $this->accessToken,
-                'Accept' => 'application/json', 
-                'Content-type' => 'application/json; charset=utf-8',
-            ],
-            //'debug' => true
-        ]);
-        
-        $res = json_decode((string)$res->getBody(), true);
 
-        if(isset($res['errors'])){
-            throw new Exception(json_encode($res['errors']));
-        }
-        elseif(isset($res['data'][$method])) {
-            return $res['data'][$method];
-        }
-        else {
-            return $res;
-        }
+        $request = $this->requestFactory->createRequest('POST', $this->getEndpointUri('/graphql'));
+        $request->withHeader()
+                ->withBody('xa');
+
+        $response = $this->httpClient->sendRequest($request);
+
+//        request('POST', $this->getEndpoint('/graphql'), [
+//            'json' => [
+//                'query' => $readyQuery,
+//            ],
+//            'headers' => [
+//                'Authorization' => 'Bearer ' . $this->accessToken,
+//                'Accept' => 'application/json',
+//                'Content-type' => 'application/json; charset=utf-8',
+//            ],
+//            //'debug' => true
+//        ]);
+//
+//        $res = json_decode((string)$res->getBody(), true);
+//
+//        if(isset($res['errors'])){
+//            throw new Exception(json_encode($res['errors']));
+//        }
+//        elseif(isset($res['data'][$method])) {
+//            return $res['data'][$method];
+//        }
+//        else {
+//            return $res;
+//        }
     }
     
     public function query($method, $data, $query)
     {
-        $builder = new QueryBuilder();
-        $readyQuery = $builder
-            ->name($method)
-            ->arguments($data)
-            ->body($query)
-            ->build();
+//        $builder = new QueryBuilder();
+//        $readyQuery = $builder
+//            ->name($method)
+//            ->arguments($data)
+//            ->body($query)
+//            ->build();
+//
+//        $res = $this->guzzle->request('POST', $this->getEndpoint('/graphql'), [
+//            'json' => [
+//                'query' => $readyQuery,
+//            ],
+//            'headers' => [
+//                'Authorization' => 'Bearer ' . $this->accessToken,
+//                'Accept' => 'application/json',
+//                'Content-type' => 'application/json; charset=utf-8',
+//            ],
+//            //'debug' => true
+//        ]);
+//
+//        $res = json_decode((string)$res->getBody(), true);
+//
+//        if(isset($res['errors'])){
+//            throw new Exception(json_encode($res['errors']));
+//        }
+//        elseif(isset($res['data'][$method])) {
+//            return $res['data'][$method];
+//        }
+//        else {
+//            return $res;
+//        }
+    }
 
-        $res = $this->guzzle->request('POST', $this->getEndpoint('/graphql'), [
-            'json' => [
-                'query' => $readyQuery,
-            ],
-            'headers' => [
-                'Authorization' => 'Bearer ' . $this->accessToken,
-                'Accept' => 'application/json', 
-                'Content-type' => 'application/json; charset=utf-8',
-            ],
-            //'debug' => true
+    protected function getEndpointUri(string $string): string
+    {
+        return $this->baseUrl.$string;
+    }
+
+    public function authenticate()
+    {
+        $request = $this->requestFactory->createRequest('POST', $this->getEndpointUri('/oauth/v2/token'));
+        $body = http_build_query([
+            'client_id' => $this->clientId,
+            'client_secret' => $this->clientSecret,
+            'grant_type' => 'password',
+            'username' => $this->username,
+            'password' => $this->password,
         ]);
-        
-        $res = json_decode((string)$res->getBody(), true);
+        var_dump($body);
+        $request
+            ->withHeader('Content-Type', 'application/x-www-form-urlencoded')
+            ->withBody($this->streamFactory->createStream($body));
+        var_dump($request);
+        $response = $this->httpClient->sendRequest($request);
+        var_dump((string)$response->getBody());
+        die();
 
-        if(isset($res['errors'])){
-            throw new Exception(json_encode($res['errors']));
-        }
-        elseif(isset($res['data'][$method])) {
-            return $res['data'][$method];
-        }
-        else {
-            return $res;
-        }
-    }
-
-    protected function getEndpoint($str)
-    {
-        return $this->baseUrl.$str;
-    }
-
-    protected function authenticate()
-    {
-        $res = $this->guzzle->request('GET', $this->getEndpoint('/oauth/v2/token'), [
+        $res = $this->guzzle->request('GET', $this->getEndpointUri('/oauth/v2/token'), [
             'query' => [
                 'client_id' => $this->clientId,
                 'client_secret' => $this->clientSecret,
