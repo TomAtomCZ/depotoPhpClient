@@ -2,7 +2,9 @@
 
 namespace Depoto\GraphQL;
 
+use QueryBuilder\Interfaces\BuilderInterface;
 use QueryBuilder\Mutation\MutationBuilder as Base;
+use QueryBuilder\Traits\BuilderTrait;
 
 class MutationBuilder extends Base
 {
