@@ -2,12 +2,15 @@
 
 namespace Depoto;
 
+use Depoto\Exception\ErrorException;
 use Depoto\GraphQL\MutationBuilder;
 use Depoto\GraphQL\QueryBuilder;
+use http\Exception\InvalidArgumentException;
 use Psr\Http\Client\ClientInterface;
 use Psr\Http\Message\RequestFactoryInterface;
 use Psr\Http\Message\StreamFactoryInterface;
 use Psr\Log\LoggerInterface;
+use TheSeer\Tokenizer\Exception;
 
 class Client
 {
@@ -111,6 +114,10 @@ class Client
 
     public function call(string $type, string $method, array $arguments, array $body): array
     {
+        //if(isset($body['data']) && !in_array($data, 'errors')) {
+        //    $body[] = 'errors';
+        //}
+
         $builder = $type == "mutation" ? new MutationBuilder() : new QueryBuilder();
         $readyQuery = $builder
             ->name($method)
@@ -128,11 +135,8 @@ class Client
 
         if($response->getStatusCode() == 200) {
             $res = json_decode((string)$response->getBody(), true);
-            if(isset($res['error'])){
-                throw new Exception($res['error']);
-            }
-            elseif(isset($res['errors'])){
-                throw new Exception($res['errors']);
+            if(isset($res['error']) || isset($res['errors'])) {
+                throw new ErrorException($request, $response);
             }
             elseif(isset($res['data'][$method])) {
                 return $res['data'][$method];
