@@ -16,7 +16,7 @@ class QueryBuilder extends Base
         if (empty($this->arguments)) {
             $this->processArgumentsNames($arguments);
 
-            $args = json_encode($arguments, JSON_UNESCAPED_UNICODE);
+            $args = json_encode($arguments);
             $this->arguments = $this->replacePlaceholders(sprintf('(%s)', substr($args, 1, strlen($args) - 2)));
         }
 
