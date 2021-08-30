@@ -16,20 +16,24 @@ use Psr\Http\Message\ResponseInterface;
 use Psr\Http\Message\RequestFactoryInterface;
 use Psr\Http\Message\StreamFactoryInterface;
 use Psr\Log\LoggerInterface;
+use Psr\SimpleCache\CacheInterface;
 
 class Client
 {
-    protected string $baseUrl = 'https://server1.depoto.cz.tomatomstage.cz';
+    /**
+     * knmknmknmk
+     * @var string
+     */
     protected string $clientId = '1_2rw1go4w8igw84g0ko488cs8c0ws4ccc8sgsc8ckgoo48ccco8';
     protected string $clientSecret = '3lvk182vjscgcs4ws44sks88skgkowoc00ow084soc0oc0gg88';
+    protected string $baseUrl = 'https://server1.depoto.cz.tomatomstage.cz';
     protected string $username;
     protected string $password;
-    protected string $accessToken;
-    protected string $refreshToken;
-    protected DateTime $accessTokenExpiresDate;
+    protected ?string $accessToken = null;
     protected ClientInterface $httpClient;
     protected RequestFactoryInterface $requestFactory;
     protected StreamFactoryInterface $streamFactory;
+    protected CacheInterface $cache;
     protected LoggerInterface $logger;
     protected RequestInterface $lastRequest;
     protected ResponseInterface $lastResponse;
@@ -37,17 +41,20 @@ class Client
     public function __construct(ClientInterface $httpClient,
                                 RequestFactoryInterface $requestFactory,
                                 StreamFactoryInterface $streamFactory,
+                                CacheInterface $cache,
                                 LoggerInterface $logger)
     {
         $this->httpClient = $httpClient;
         $this->requestFactory = $requestFactory;
         $this->streamFactory = $streamFactory;
+        $this->cache = $cache;
         $this->logger = $logger;
     }
 
     public function setUsername(string $username): self
     {
         $this->username = $username;
+        $this->accessToken = null;
         return $this;
     }
 
@@ -100,8 +107,12 @@ class Client
         return $this->clientSecret;
     }
 
-    protected function getAccessToken(): string
+    protected function getAccessToken(): ?string
     {
+        if(!$this->accessToken) {
+            $this->accessToken = $this->getOAuthData()['access_token'];
+        }
+
         return $this->accessToken;
     }
 
@@ -146,7 +157,7 @@ class Client
         $this->lastRequest = $this->requestFactory->createRequest('POST', $url)
             ->withHeader('Content-Type', 'application/json; charset=utf-8')
             ->withHeader('Accept', 'application/json')
-            ->withHeader('Authorization', 'Bearer ' . $this->accessToken)
+            ->withHeader('Authorization', 'Bearer ' . $this->getAccessToken())
             ->withBody($this->streamFactory->createStream($body));
 
         $this->logger->debug('GQLRequest: '.$readyQuery, [$url]);
@@ -159,6 +170,7 @@ class Client
             $res = json_decode($responseBody, true);
             $res = $this->decode($res);
             if(isset($res['error']) || isset($res['errors'])) {
+                $this->logger->warning('GQLError: '.$responseBody, [$url, $body]);
                 throw new ErrorException($this->lastRequest, $this->lastResponse);
             }
             elseif(isset($res['data'][$method])) {
@@ -169,9 +181,11 @@ class Client
             }
         }
         elseif($statusCode >= 400 && $statusCode <= 403) {
+            $this->logger->warning($statusCode.': '.$responseBody, [$url, $body]);
             throw new AuthenticationException($this->lastRequest, $this->lastResponse);
         }
         else {
+            $this->logger->error($statusCode.': '.$responseBody, [$url, $body]);
             throw new ServerException($this->lastRequest, $this->lastResponse);
         }
     }
@@ -182,44 +196,80 @@ class Client
      * @throws ServerException
      * @throws Exception
      */
-    public function authenticate()
+    public function authenticate($grantType = 'password'): self
     {
-        $body = http_build_query([
+        $vars = [
             'client_id' => $this->clientId,
             'client_secret' => $this->clientSecret,
-            'grant_type' => 'password',
-            'username' => $this->username,
-            'password' => $this->password,
-        ]);
+            'grant_type' => $grantType,
+        ];
 
+        if($grantType == 'password') {
+            $vars['username'] = $this->username;
+            $vars['password'] = $this->password;
+        }
+        elseif($grantType == 'refresh_token') {
+            $vars['refresh_token'] = $this->getOAuthData()['refresh_token'];
+        }
+
+        $body = http_build_query($vars);
         $url = $this->getEndpointUri('/oauth/v2/token');
         $this->lastRequest = $this->requestFactory->createRequest('POST', $url)
             ->withHeader('Content-Type', 'application/x-www-form-urlencoded; charset=utf-8')
             ->withBody($this->streamFactory->createStream($body));
 
-        $this->logger->debug('AuthenticateRequest: '.$body, [$url]);
+        $this->logger->debug('OAuthRequest: '.$body, [$url]);
         $this->lastResponse = $this->httpClient->sendRequest($this->lastRequest);
         $responseBody = (string)$this->lastResponse->getBody();
-        $this->logger->debug('AuthenticateResponse: '.$responseBody, [$url]);
+        $this->logger->debug('OAuthResponse: '.$responseBody, [$url]);
         $statusCode = $this->lastResponse->getStatusCode();
 
         if($statusCode >= 200 && $statusCode < 400) {
             $res = json_decode($responseBody, true);
-            $this->accessToken = $res['access_token'];
-            $this->refreshToken = $res['refresh_token'];
-            $this->accessTokenExpiresDate = new DateTime('+'.$res['expires_in'].' seconds');
+            $this->setOAuthData($res);
         }
         elseif($statusCode >= 400 && $statusCode <= 403) {
-            throw new AuthenticationException($this->lastRequest, $this->lastResponse);
+            $res = json_decode($responseBody, true);
+            if($grantType == 'password' && $res['error'] == 'invalid_token') { // The access token expired
+                $this->authenticate('refresh_token');
+            }
+            else {
+                $this->logger->warning($statusCode.': '.$responseBody, [$url, $body]);
+                throw new AuthenticationException($this->lastRequest, $this->lastResponse);
+            }
         }
         else {
+            $this->logger->error($statusCode.': '.$responseBody, [$url, $body]);
             throw new ServerException($this->lastRequest, $this->lastResponse);
         }
+
+        return $this;
+    }
+
+    protected function setOAuthData(array $data): void
+    {
+        $data['expires_time'] = $data['expires_in'] + time();
+        $this->cache->set($this->getOAuthDataCacheKey(), $data);
+    }
+
+    protected function getOAuthData()
+    {
+        return $this->cache->get($this->getOAuthDataCacheKey());
+    }
+
+    protected function getOAuthDataCacheKey(): string
+    {
+        return 'depoto-oauth-'.$this->username;
     }
 
     public function isAuthenticated(): bool
     {
-        if($this->accessTokenExpiresDate && $this->accessTokenExpiresDate > new DateTime('now')) {
+        $oauthData = $this->getOAuthData();
+        if(!$oauthData) {
+            return false;
+        }
+
+        if($oauthData['access_token'] && $oauthData['expires_time'] > time()-100) {
             return true;
         }
 

@@ -17,12 +17,11 @@ class AuthenticationException extends Exception
         $this->response = $response;
 
         $res = json_decode((string)$response->getBody(), true);
-        if(isset($res['error'])) {
-            $this->errors[] = $res['error'];
+        if(isset($res['error_description'])) {
+            $this->errors[] = $res['error_description'];
         }
-
-        if(isset($res['errors'])) {
-            $this->errors[] = $res['errors'];
+        elseif(isset($res['error'])) {
+            $this->errors[] = $res['error'];
         }
 
         /**

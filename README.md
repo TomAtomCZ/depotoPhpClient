@@ -1,56 +1,153 @@
-# Depoto Php Client
+# Depoto PHP Client
 
-## Použití
+### Depoto
+Depoto je skladový, expediční a pokladní systém
+
+### Použití
+
 ```php
-$client = new \Depoto\Client('username', 'password', 'https://server1.depoto.cz');
+use Depoto\Client;
+use Monolog\Handler\StreamHandler;
+use Monolog\Logger;
+use Nyholm\Psr7\Factory\Psr17Factory;
+use Symfony\Component\Cache\Adapter\ApcuAdapter;
+use Symfony\Component\Cache\Psr16Cache;
+use Symfony\Component\HttpClient\Psr18Client;
 
-// Vytvoření účtenky
-$client->createEetReceipt(
-            $checkoutId, // ID pokladny v Depoto
-            $number, // Číslo účtenky
-            $dateCreated, // Datum vytvoření, string, např: date('Y-m-d h:is')
-            $currency, // Měna, např: CZK
-            $totalPrice,// Celková cena
-            $priceZeroVat = null, // Částka v nulové sazbě dph
-            $priceStandardVat = null, // Základ daně v základní sazbě dph
-            $vatStandard = null, // Částka v základní sazbě dph
-            $priceFirstReducedVat = null, // Základ daně v první snížené sazbě dph
-            $vatFirstReduced = null, // Částka v první snížené sazbě dph
-            $priceSecondReducedVat = null, // Základ daně v druhé snížené sazbě dph
-            $vatSecondReduced = null, // Částka v druhé snížené sazbě dph
-            $priceForSubsequentSettlement = null, // Částka k následnému čerpání
-            $priceUsedSubsequentSettlement = null // Následně čerpaná částka
-            );
-            
-// Manuální znovuodeslání účtenky, ID účtenky v Depoto            
-$client->sendEetReceipt($id); 
+$httpClient = new Psr18Client(); // PSR-18 Http client
+$psr17Factory = new Psr17Factory(); // PSR-17
+$cache = new Psr16Cache(new ApcuAdapter('Depoto')); // PSR-16 Simple cache
+$logger = new Logger('Depoto', [new StreamHandler('depoto.log', Logger::DEBUG)]); // PSR Logger
 
-// Výpis účtenek
-$client->getEetReceipts($page = 1, $sort = 'id', $direction = 'asc', $filters = []);
+$depoto = new Client($httpClient, $psr17Factory, $psr17Factory, $cache, $logger);
+$depoto
+    ->setBaseUrl('https://server1.depoto.cz')
+    ->setUsername('username')
+    ->setPassword('password');
 ```
+```php
+use Depoto\ClientFactory;
 
-## Použití s vlastní query / mutací
-
-#### úvod do GraphQL
-
+$depotoFactory = new ClientFactory($httpClient, $psr17Factory, $psr17Factory, $cache, $logger);
+$depoto = $depotoFactory->createClient('username', 'password','https://server1.depoto.cz');
+```
+### GraphQl
 * [GraphQL dokumentace](http://graphql.org/learn/)
-
-#### přehled Depoto API
-
 * [nástroj pro zobrazení GraphQL endpointu + testování (GraphiQL / ChromeiQL)](https://chrome.google.com/webstore/detail/chromeiql/fkkiamalmpiidkljmicmjfbieiclmeij)
 
-* [Depoto root schema url](https://server1.depoto.cz/graphql)
-
-
 ```php
-$client = new \Depoto\Client('username', 'password', 'https://server1.depoto.cz');
+$result = $depoto->query('queryName', 
+    ['arg1' => $arg1, 'arg2' => $arg2],
+    ['returnSchema' => ['field', 'object' => ['field']]]);
 
-$schema = ['id', 'name'];
-$result = $client->query('queryName', 
-        ['arg1' => $arg1, 'arg2' => $arg2],
-        ['returnSchema' => $schema]);
+$result = $depoto->mutation('mutationName', 
+    ['arg1' => $arg1, 'arg2' => $arg2],
+    ['returnSchema' => ['field', 'object' => ['field']]]);
 ```
 
-#### Zakladni prehled
+### Ouery
+```php
+$result = $depoto->query('product', 
+    ['id' => $id],
+    ['data' => ['id', 'name', 'ean', 'quantities' => ['field']]]);
 
-* [Informace o zakladnich API metodach](./API_BASICS.md)
+$result = $depoto->query('products', 
+    ['filters' => ['fulltext' => $search]],
+    ['items' => ['id', 'name', 'ean', 'quantities' => ['field']]]);
+
+$result = $depoto->query('order', 
+    ['id' => $id],
+    ['data' => ['id', 'name', 'ean', 'quantities' => ['field']]]);
+
+$result = $depoto->query('orders', 
+    ['filters' => ['fulltext' => $search]],
+    ['items' => ['id', 'name', 'ean', 'quantities' => ['field']]]);
+```
+
+### Mutation
+#### Vytvoření produktu
+```php
+$result = $depoto->mutation('createProduct', 
+    [
+        'name' => 'Testovací produkt',
+    ],
+    ['data' => ['id']]);
+```
+#### Úprava produktu
+```php
+$result = $depoto->mutation('updateProduct', 
+    ['id' => $id],
+    ['data' => ['id']]);
+```
+#### Vytvoření zákazníka
+```php
+$resultCustomer = $depoto->mutation('createCustomer', 
+    ['id' => $id],
+    ['data' => ['id']]);
+```
+#### Vytvoření adresy
+```php
+$resultAddress = $depoto->mutation('createAddress', 
+    [
+        'customer' => $resultCustomer['data']['id'],  // Nepovinné
+        'branchId' => 123456, // Nepovinné, identifikátor pobočky např. výdejny pro zásilkovnu.
+    ],
+    ['data' => ['id']]);
+```
+#### Vytvoření objednávky
+```php
+$result = $depoto->mutation('createOrder', 
+    [
+        'status' => 'reservation',
+        'customer' => $resultCustomer['data']['id'], // Nepovinné
+        'invoiceAddress' => $resultAddress['data']['id']],
+        'shippingAddress' => $resultAddress['data']['id']],
+        'currency' => 'CZK',
+        'carrier' => 'ppl',
+        'items' => [
+            ['product' => 123, 'amount' => 2],
+        ],
+        'paymentItems' => [
+            ['payment' => 789, 'amount' => 589.5],
+        ],
+    ]
+    ['data' => ['id']]);
+```
+#### Přidání položky do objednávky
+```php
+$result = $depoto->mutation('createOrderItem', 
+    [
+        'product' => 123
+        'amount' => 5,
+        'price' => 31.5,
+        'vat' => 666,
+    ],
+    ['data' => ['id']]);
+```
+#### Úprava položky objednávky
+```php    
+$result = $depoto->mutation('updateOrderItem', 
+    [
+        'id' => $id,
+        'amount' => 5,
+    ],
+    ['data' => ['id']]);    
+```
+#### Smazání položky objednávky
+```php        
+$result = $depoto->mutation('deleteOrderItem', 
+    ['id' => $id],
+    ['errors']]);    
+```
+#### Úprava objednávky
+```php    
+$result = $depoto->mutation('updateOrder', 
+    ['id' => $id],
+    ['data' => ['id']]);
+```
+#### Zrušení rezervace
+```php    
+$result = $depoto->mutation('deleteReservation', 
+    ['id' => $id],
+    ['errors']]);      
+```
