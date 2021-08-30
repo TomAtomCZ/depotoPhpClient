@@ -1,7 +1,8 @@
 # Depoto PHP Client
 
 ### Depoto
-Depoto je skladový, expediční a pokladní systém
+Depoto je skladový, expediční a pokladní systém poskytující GraphQl API s OAuth2 authentifikací.
+Tato knihovna má za cíl práci s API zpříjemnit;) 
 
 ### Použití
 
@@ -15,25 +16,28 @@ use Symfony\Component\Cache\Psr16Cache;
 use Symfony\Component\HttpClient\Psr18Client;
 
 $httpClient = new Psr18Client(); // PSR-18 Http client
-$psr17Factory = new Psr17Factory(); // PSR-17
+$psr17Factory = new Psr17Factory(); // PSR-17 HTTP Factories,  PSR-7 HTTP message
 $cache = new Psr16Cache(new ApcuAdapter('Depoto')); // PSR-16 Simple cache
-$logger = new Logger('Depoto', [new StreamHandler('depoto.log', Logger::DEBUG)]); // PSR Logger
+$logger = new Logger('Depoto', [new StreamHandler('depoto.log', Logger::DEBUG)]); // PSR-3 Logger
 
 $depoto = new Client($httpClient, $psr17Factory, $psr17Factory, $cache, $logger);
 $depoto
-    ->setBaseUrl('https://server1.depoto.cz')
+    ->setBaseUrl('https://server1.depoto.cz') // Pro testování: https://server1.depoto.cz.tomatomstage.cz
     ->setUsername('username')
     ->setPassword('password');
 ```
+Pokud se z vaší aplikace potřebujetepřipojovat k různým účtů, možná vašemu service containeru příjde vhod továrna: 
 ```php
 use Depoto\ClientFactory;
 
 $depotoFactory = new ClientFactory($httpClient, $psr17Factory, $psr17Factory, $cache, $logger);
-$depoto = $depotoFactory->createClient('username', 'password','https://server1.depoto.cz');
+$depoto = $depotoFactory->createClient('username', 'password', 'https://server1.depoto.cz');
 ```
 ### GraphQl
-* [GraphQL dokumentace](http://graphql.org/learn/)
-* [nástroj pro zobrazení GraphQL endpointu + testování (GraphiQL / ChromeiQL)](https://chrome.google.com/webstore/detail/chromeiql/fkkiamalmpiidkljmicmjfbieiclmeij)
+ * Query pro čtení a Mutation pro zápis.
+ * Definují stromovou strukturu kterou chci vrátit.
+ * [GraphQL dokumentace](http://graphql.org/learn/)
+ * [GraphQL Explorer / GraphiQL konzole](https://server1.depoto.cz/graphql/explorer) pro testování queries a procházení kompletního aktuálního schématu.
 
 ```php
 $result = $depoto->query('queryName', 
@@ -57,7 +61,10 @@ $result = $depoto->query('products',
 
 $result = $depoto->query('order', 
     ['id' => $id],
-    ['data' => ['id', 'name', 'ean', 'quantities' => ['field']]]);
+    ['data' => [
+        'id', 'processStatus' => ['id', 'name', 'note', 'created'], 
+        'quantities' => ['field']
+    ]]);
 
 $result = $depoto->query('orders', 
     ['filters' => ['fulltext' => $search]],
@@ -70,19 +77,32 @@ $result = $depoto->query('orders',
 $result = $depoto->mutation('createProduct', 
     [
         'name' => 'Testovací produkt',
+        'ean' => '123456987123', // EAN musí být unikátní
+        'code' => 'kod', // Nemusí být unikátní
+        'sellPrice' => 99.9,
+        'purchasePrice' => 99.9, // Nepovinné, výchozí nákupní cena
+        'externalId' => 'vas-identifikator-123', // Nepovinné, externí identifikátor
     ],
     ['data' => ['id']]);
 ```
 #### Úprava produktu
 ```php
 $result = $depoto->mutation('updateProduct', 
-    ['id' => $id],
+    [
+        'id' => $id, // ID produktu v Depotu
+        'name' => 'Nový název',
+    ],
     ['data' => ['id']]);
 ```
 #### Vytvoření zákazníka
 ```php
 $resultCustomer = $depoto->mutation('createCustomer', 
-    ['id' => $id],
+    [
+        'firstName' => 'Jméno',
+        'lastName' => 'Příjmení',
+        'email' => 'email@email.cz',
+        'phone' => '777123456',
+    ],
     ['data' => ['id']]);
 ```
 #### Vytvoření adresy
@@ -90,6 +110,14 @@ $resultCustomer = $depoto->mutation('createCustomer',
 $resultAddress = $depoto->mutation('createAddress', 
     [
         'customer' => $resultCustomer['data']['id'],  // Nepovinné
+        'firstName' => 'Jméno',
+        'lastName' => 'Příjmení',
+        'email' => 'email@email.cz',
+        'phone' => '777123456',
+        'street' => 'Ulice 12',
+        'city' => 'Město',
+        'zip' => '28903',
+        'country' => 'CZ', // ISO 3166-1 alpha-2 country code
         'branchId' => 123456, // Nepovinné, identifikátor pobočky např. výdejny pro zásilkovnu.
     ],
     ['data' => ['id']]);
@@ -142,10 +170,20 @@ $result = $depoto->mutation('deleteOrderItem',
 #### Úprava objednávky
 ```php    
 $result = $depoto->mutation('updateOrder', 
-    ['id' => $id],
+    [
+        'id' => $id,
+        'shippingAddress' => 753951, // Změna doručovací adresy
+        'items' => [
+            ['product' => 123, 'amount' => 2], // Nové položky
+        ],
+        'paymentItems' => [
+            ['payment' => 789, 'amount' => 589.5],
+        ],
+    ],
     ['data' => ['id']]);
 ```
 #### Zrušení rezervace
+Zručit jde jen objednávky ve stavu rezervace (status="reservation").
 ```php    
 $result = $depoto->mutation('deleteReservation', 
     ['id' => $id],
