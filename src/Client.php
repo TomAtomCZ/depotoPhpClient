@@ -2,291 +2,348 @@
 
 namespace Depoto;
 
-use Exception;
+use DateTime;
+use Depoto\Exception\AuthenticationException;
+use Depoto\Exception\ErrorException;
+use Depoto\Exception\ServerException;
 use Depoto\GraphQL\MutationBuilder;
 use Depoto\GraphQL\QueryBuilder;
-use function GuzzleHttp\json_decode;
-use function GuzzleHttp\json_encode;
+use Exception;
+use Psr\Http\Client\ClientExceptionInterface;
+use Psr\Http\Client\ClientInterface;
+use Psr\Http\Message\RequestInterface;
+use Psr\Http\Message\ResponseInterface;
+use Psr\Http\Message\RequestFactoryInterface;
+use Psr\Http\Message\StreamFactoryInterface;
+use Psr\Log\LoggerInterface;
+use Psr\SimpleCache\CacheInterface;
 
 class Client
 {
-    protected $guzzle;
-    protected $accessToken;
-    protected $baseUrl;
-    protected $username;
-    protected $password;
-    protected $clientId;
-    protected $clientSecret;
-    
-    protected $vats = null;
-
     /**
-     *
-     * @param string $username
-     * @param string $password
-     * @param string $baseUrl
-     * @param string $clientId
-     * @param string $clientSecret
+     * knmknmknmk
+     * @var string
      */
-    public function __construct($username, $password, 
-        $baseUrl = 'https://server1.depoto.cz.tomatomstage.cz',
-        $clientId = '1_2rw1go4w8igw84g0ko488cs8c0ws4ccc8sgsc8ckgoo48ccco8',
-        $clientSecret = '3lvk182vjscgcs4ws44sks88skgkowoc00ow084soc0oc0gg88'
-        )
+    protected string $clientId = '1_2rw1go4w8igw84g0ko488cs8c0ws4ccc8sgsc8ckgoo48ccco8';
+    protected string $clientSecret = '3lvk182vjscgcs4ws44sks88skgkowoc00ow084soc0oc0gg88';
+    protected string $baseUrl = 'https://server1.depoto.cz.tomatomstage.cz';
+    protected string $username;
+    protected string $password;
+    protected ?string $accessToken = null;
+    protected ClientInterface $httpClient;
+    protected RequestFactoryInterface $requestFactory;
+    protected StreamFactoryInterface $streamFactory;
+    protected CacheInterface $cache;
+    protected LoggerInterface $logger;
+    protected RequestInterface $lastRequest;
+    protected ResponseInterface $lastResponse;
+
+    public function __construct(ClientInterface $httpClient,
+                                RequestFactoryInterface $requestFactory,
+                                StreamFactoryInterface $streamFactory,
+                                CacheInterface $cache,
+                                LoggerInterface $logger)
+    {
+        $this->httpClient = $httpClient;
+        $this->requestFactory = $requestFactory;
+        $this->streamFactory = $streamFactory;
+        $this->cache = $cache;
+        $this->logger = $logger;
+    }
+
+    public function setUsername(string $username): self
     {
         $this->username = $username;
+        $this->accessToken = null;
+        return $this;
+    }
+
+    public function getUsername(): string
+    {
+        return $this->username;
+    }
+
+    public function setPassword(string $password): self
+    {
         $this->password = $password;
+        return $this;
+    }
+
+    public function getPassword(): string
+    {
+        return $this->password;
+    }
+
+    public function setBaseUrl(string $baseUrl): self
+    {
         $this->baseUrl = $baseUrl;
+        return $this;
+    }
+
+    public function getBaseUrl(): string
+    {
+        return $this->baseUrl;
+    }
+
+    public function setClientId(string $clientId): self
+    {
         $this->clientId = $clientId;
+        return $this;
+    }
+
+    public function getClientId(): string
+    {
+        return $this->clientId;
+    }
+
+    public function setClientSecret(string $clientSecret): self
+    {
         $this->clientSecret = $clientSecret;
-
-        $this->guzzle = new \GuzzleHttp\Client();
-        $this->authenticate();
+        return $this;
     }
 
-    public function mutation($method, $data, $query)
+    public function getClientSecret(): string
     {
-        $builder = new MutationBuilder();
+        return $this->clientSecret;
+    }
+
+    protected function getAccessToken(): ?string
+    {
+        if(!$this->accessToken) {
+            $this->accessToken = $this->getOAuthData()['access_token'];
+        }
+
+        return $this->accessToken;
+    }
+
+    public function mutation(string $method, array $arguments, array $body): array
+    {
+        return $this->call('mutation', $method, $arguments, $body);
+    }
+
+    public function query(string $method, array $arguments, array $body): array
+    {
+        return $this->call('query', $method, $arguments, $body);
+    }
+
+    /**
+     * @throws ClientExceptionInterface
+     * @throws ErrorException
+     * @throws AuthenticationException
+     * @throws ServerException
+     */
+    public function call(string $type, string $method, array $arguments, array $body): array
+    {
+        if(!$this->isAuthenticated()) {
+            $this->authenticate();
+        }
+
+        if(isset($body['data']) && !in_array('errors', $body)) {
+            $body[] = 'errors';
+        }
+
+        $arguments = $this->encode($arguments);
+
+        $builder = $type == "mutation" ? new MutationBuilder() : new QueryBuilder();
         $readyQuery = $builder
             ->name($method)
-            ->arguments($data)
-            ->body($query)
+            ->arguments($arguments)
+            ->body($body)
             ->build();
 
-        $res = $this->guzzle->request('POST', $this->getEndpoint('/graphql'), [
-            'json' => [
-                'query' => $readyQuery,
-            ],
-            'headers' => [
-                'Authorization' => 'Bearer ' . $this->accessToken,
-                'Accept' => 'application/json', 
-                'Content-type' => 'application/json; charset=utf-8',
-            ],
-            //'debug' => true
-        ]);
-        
-        $res = json_decode((string)$res->getBody(), true);
+        $url = $this->getEndpointUri('/graphql');
+        $body = json_encode(['query' => $readyQuery]);
 
-        if(isset($res['errors'])){
-            throw new Exception(json_encode($res['errors']));
-        }
-        elseif(isset($res['data'][$method])) {
-            return $res['data'][$method];
-        }
-        else {
-            return $res;
-        }
-    }
-    
-    public function query($method, $data, $query)
-    {
-        $builder = new QueryBuilder();
-        $readyQuery = $builder
-            ->name($method)
-            ->arguments($data)
-            ->body($query)
-            ->build();
+        $this->lastRequest = $this->requestFactory->createRequest('POST', $url)
+            ->withHeader('Content-Type', 'application/json; charset=utf-8')
+            ->withHeader('Accept', 'application/json')
+            ->withHeader('Authorization', 'Bearer ' . $this->getAccessToken())
+            ->withBody($this->streamFactory->createStream($body));
 
-        $res = $this->guzzle->request('POST', $this->getEndpoint('/graphql'), [
-            'json' => [
-                'query' => $readyQuery,
-            ],
-            'headers' => [
-                'Authorization' => 'Bearer ' . $this->accessToken,
-                'Accept' => 'application/json', 
-                'Content-type' => 'application/json; charset=utf-8',
-            ],
-            //'debug' => true
-        ]);
-        
-        $res = json_decode((string)$res->getBody(), true);
+        $this->logger->debug('GQLRequest: '.$readyQuery, [$url]);
+        $this->lastResponse = $this->httpClient->sendRequest($this->lastRequest);
+        $responseBody = (string)$this->lastResponse->getBody();
+        $this->logger->debug('GQLResponse: '.$responseBody, [$url]);
+        $statusCode = $this->lastResponse->getStatusCode();
 
-        if(isset($res['errors'])){
-            throw new Exception(json_encode($res['errors']));
-        }
-        elseif(isset($res['data'][$method])) {
-            return $res['data'][$method];
-        }
-        else {
-            return $res;
-        }
-    }
-
-    protected function getEndpoint($str)
-    {
-        return $this->baseUrl.$str;
-    }
-
-    protected function authenticate()
-    {
-        $res = $this->guzzle->request('GET', $this->getEndpoint('/oauth/v2/token'), [
-            'query' => [
-                'client_id' => $this->clientId,
-                'client_secret' => $this->clientSecret,
-                'grant_type' => 'password',
-                'username' => $this->username,
-                'password' => $this->password,
-            ],
-            'headers' => []
-        ]);
-
-        $res = json_decode((string)$res->getBody(), true);
-        $this->accessToken = $res['access_token'];
-    }
-    
-    /**
-     * @param float $percent
-     * @param bool $create
-     * @return mixed|null
-     * @throws Exception
-     */
-    public function getVatIdByPercent(float $percent, $create = true)
-    {
-        if($this->vats == null) {
-            $res = $this->query('vats',
-                [],
-                ['items' => ['id', 'percent']]);
-
-            foreach($res['items'] as $r) {
-                $this->vats[(float) $r['percent']] = $r['id'];
+        if($statusCode >= 200 && $statusCode < 400) {
+            $res = json_decode($responseBody, true);
+            $res = $this->decode($res);
+            if(isset($res['error']) || isset($res['errors'])) {
+                $this->logger->warning('GQLError: '.$responseBody, [$url, $body]);
+                throw new ErrorException($this->lastRequest, $this->lastResponse);
+            }
+            elseif(isset($res['data'][$method])) {
+                return $res['data'][$method];
+            }
+            else {
+                return $res;
             }
         }
-
-        if(!isset($this->vats[$percent]) && $create) {
-            $res = $this->mutation('createVat',
-                ['name' => $percent, 'percent' => (float)$percent, 'default' => false],
-                ['data' => ['id', 'percent'], 'errors']);
-
-            $this->vats[(float) $res['percent']] = $res['id'];
+        elseif($statusCode >= 400 && $statusCode <= 403) {
+            $this->logger->warning($statusCode.': '.$responseBody, [$url, $body]);
+            throw new AuthenticationException($this->lastRequest, $this->lastResponse);
         }
-
-        return isset($this->vats[$percent]) ? $this->vats[$percent] : null;
+        else {
+            $this->logger->error($statusCode.': '.$responseBody, [$url, $body]);
+            throw new ServerException($this->lastRequest, $this->lastResponse);
+        }
     }
-    
+
     /**
-     * 
-     * @param int $checkoutId
-     * @param int $number
-     * @param string $dateCreated
-     * @param string $currency
-     * @param int $totalPrice
-     * @param int $priceZeroVat
-     * @param int $priceStandardVat
-     * @param int $vatStandard
-     * @param int $priceFirstReducedVat
-     * @param int $vatFirstReduced
-     * @param int $priceSecondReducedVat
-     * @param int $vatSecondReduced
-     * @param int $priceForSubsequentSettlement
-     * @param int $priceUsedSubsequentSettlement
-     * @return array
+     * @throws ClientExceptionInterface
+     * @throws AuthenticationException
+     * @throws ServerException
      * @throws Exception
      */
-    public function createEetReceipt($checkoutId, $number, $dateCreated, $currency, $totalPrice,
-            $priceZeroVat = null, $priceStandardVat = null, $vatStandard = null, $priceFirstReducedVat = null,
-            $vatFirstReduced = null, $priceSecondReducedVat = null, $vatSecondReduced = null, 
-            $priceForSubsequentSettlement = null, $priceUsedSubsequentSettlement = null
-            ) 
+    public function authenticate($grantType = 'password'): self
     {
-        $data = [
-                    'checkout' => $checkoutId,
-                    'number' => $number,
-                    'dateCreated' => $dateCreated,
-                    'currency' => $currency,
-                    'totalPrice' => $totalPrice,
-                    'priceZeroVat' => $priceZeroVat,
-                    'priceStandardVat' => $priceStandardVat,
-                    'vatStandard' => $vatStandard,
-                    'priceFirstReducedVat' => $priceFirstReducedVat,
-                    'vatFirstReduced' => $vatFirstReduced,
-                    'priceSecondReducedVat' => $priceSecondReducedVat,
-                    'vatSecondReduced' => $vatSecondReduced,
-                    'priceForSubsequentSettlement' => $priceForSubsequentSettlement,
-                    'priceUsedSubsequentSettlement' => $priceUsedSubsequentSettlement,
-                ];
-        
-        foreach($data as $key => $val) {
-            if($data[$key] == null) {
-                unset($data[$key]);
+        $vars = [
+            'client_id' => $this->clientId,
+            'client_secret' => $this->clientSecret,
+            'grant_type' => $grantType,
+        ];
+
+        if($grantType == 'password') {
+            $vars['username'] = $this->username;
+            $vars['password'] = $this->password;
+        }
+        elseif($grantType == 'refresh_token') {
+            $vars['refresh_token'] = $this->getOAuthData()['refresh_token'];
+        }
+
+        $body = http_build_query($vars);
+        $url = $this->getEndpointUri('/oauth/v2/token');
+        $this->lastRequest = $this->requestFactory->createRequest('POST', $url)
+            ->withHeader('Content-Type', 'application/x-www-form-urlencoded; charset=utf-8')
+            ->withBody($this->streamFactory->createStream($body));
+
+        $this->logger->debug('OAuthRequest: '.$body, [$url]);
+        $this->lastResponse = $this->httpClient->sendRequest($this->lastRequest);
+        $responseBody = (string)$this->lastResponse->getBody();
+        $this->logger->debug('OAuthResponse: '.$responseBody, [$url]);
+        $statusCode = $this->lastResponse->getStatusCode();
+
+        if($statusCode >= 200 && $statusCode < 400) {
+            $res = json_decode($responseBody, true);
+            $this->setOAuthData($res);
+        }
+        elseif($statusCode >= 400 && $statusCode <= 403) {
+            $res = json_decode($responseBody, true);
+            if($grantType == 'password' && $res['error'] == 'invalid_token') { // The access token expired
+                $this->authenticate('refresh_token');
+            }
+            else {
+                $this->logger->warning($statusCode.': '.$responseBody, [$url, $body]);
+                throw new AuthenticationException($this->lastRequest, $this->lastResponse);
             }
         }
-        
-        $res = $this->mutation('createEetReceipt', 
-                $data, 
-                ['data' => $this->getReceiptParams(), 'errors']);
-        
-        if(count($res['errors'])){
-            throw new Exception(json_encode($res['errors']));
+        else {
+            $this->logger->error($statusCode.': '.$responseBody, [$url, $body]);
+            throw new ServerException($this->lastRequest, $this->lastResponse);
         }
-        
-        return $res;
+
+        return $this;
     }
-    
-    /**
-     * 
-     * @param int $id
-     * @return array
-     * @throws Exception
-     */
-    public function sendEetReceipt($id) 
+
+    protected function setOAuthData(array $data): void
     {
-        $res = $this->mutation('sendEetReceipt', 
-                ['id' => $id], 
-                ['data' => $this->getReceiptParams(), 'errors']);
-        
-        if(count($res['errors'])){
-            throw new Exception(json_encode($res['errors']));
+        $data['expires_time'] = $data['expires_in'] + time();
+        $this->cache->set($this->getOAuthDataCacheKey(), $data);
+    }
+
+    protected function getOAuthData()
+    {
+        return $this->cache->get($this->getOAuthDataCacheKey());
+    }
+
+    protected function getOAuthDataCacheKey(): string
+    {
+        return 'depoto-oauth-'.$this->username;
+    }
+
+    public function isAuthenticated(): bool
+    {
+        $oauthData = $this->getOAuthData();
+        if(!$oauthData) {
+            return false;
         }
-        
-        return $res;
+
+        if($oauthData['access_token'] && $oauthData['expires_time'] > time()-100) {
+            return true;
+        }
+
+        return false;
     }
-    
-    /**
-     * 
-     * @param int $page
-     * @param string $sort
-     * @param string $direction asc/desc
-     * @param array $filters
-     * @return array
-     * @throws Exception
-     */
-    public function getEetReceipts($page = 1, $sort = 'id', $direction = 'asc', $filters = []) 
+
+    protected function getEndpointUri(string $string): string
     {
-        $res = $this->query('eetReceipts', 
-                ['page' => $page, 'sort' => $sort, 'direction' => $direction, 'filters' => $filters], 
-                ['items' => $this->getReceiptParams()]);
-        
-        return $res;
+        return $this->baseUrl.$string;
     }
-    
-    /**
-     * 
-     * @return array
-     */
-    protected function getReceiptParams()
+
+    public function getLastRequest(): RequestInterface
     {
-        return [
-                    'id',
-                    'dic',
-                    'checkoutEetId',
-                    'shopEetId',
-                    'playground',
-                    'verificationMode',
-                    'number',
-                    'dateCreated',
-                    'totalPrice',
-                    'priceZeroVat',
-                    'priceStandardVat',
-                    'vatStandard',
-                    'priceFirstReducedVat',
-                    'vatFirstReduced',
-                    'priceSecondReducedVat',
-                    'vatSecondReduced',
-                    'priceForSubsequentSettlement',
-                    'priceUsedSubsequentSettlement',
-                    'fik',
-                    'bkp',
-                    'pkp',
-                ];
+        return $this->lastRequest;
+    }
+
+    protected function getLastResponse(): ResponseInterface
+    {
+        return $this->lastResponse;
+    }
+
+    protected function encode($data)
+    {
+        if(is_array($data)) {
+            foreach($data as $k => $d) {
+                if(in_array($k, ['pkcs12', 'base64Data'])) {
+                    continue;
+                }
+                if(is_bool($d)) {
+                    continue;
+                }
+                if(is_object($d)) {
+                    continue;
+                }
+                if(is_array($d)) {
+                    $data[$k] = $this->encode($d);
+                }
+                else {
+                    $data[$k] = urlencode($d);
+                }
+            }
+        }
+        else {
+            $data = urlencode($data);
+        }
+
+        return $data;
+    }
+
+    protected function decode($data)
+    {
+        if(is_array($data)) {
+            foreach($data as $k => $d) {
+                if(in_array($k, ['pkcs12', 'base64Data'])) {
+                    continue;
+                }
+                if(is_bool($d)) {
+                    continue;
+                }
+                if(is_object($d)) {
+                    continue;
+                }
+                if(is_array($d)) {
+                    $data[$k] = $this->decode($d);
+                }
+                else {
+                    $data[$k] = urldecode($d);
+                }
+            }
+        }
+        else {
+            $data = urldecode($data);
+        }
+
+        return $data;
     }
 }

@@ -2,7 +2,9 @@
 
 namespace Depoto\GraphQL;
 
+use QueryBuilder\Interfaces\BuilderInterface;
 use QueryBuilder\Query\QueryBuilder as Base;
+use QueryBuilder\Traits\BuilderTrait;
 
 class QueryBuilder extends Base
 {
