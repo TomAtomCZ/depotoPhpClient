@@ -35,10 +35,9 @@ $depoto = $depotoFactory->createClient('username', 'password', 'https://server1.
 ```
 ### GraphQl
  * Query pro čtení a Mutation pro zápis.
- * Definují stromovou strukturu kterou chci vrátit.
+ * Definuji data (stromovou strukturu), která chci vrátit.
  * [GraphQL dokumentace](http://graphql.org/learn/)
- * [GraphQL Explorer / GraphiQL konzole](https://server1.depoto.cz/graphql/explorer) pro testování queries a procházení kompletního aktuálního schématu.
-
+ 
 ```php
 $result = $depoto->query('queryName', 
     ['arg1' => $arg1, 'arg2' => $arg2],
@@ -49,26 +48,66 @@ $result = $depoto->mutation('mutationName',
     ['returnSchema' => ['field', 'object' => ['field']]]);
 ```
 
+> Pro testování queries a __procházení kompletního aktuálního schématu__ použijte [GraphQL Explorer / GraphiQL konzoli](https://server1.depoto.cz/graphql/explorer).
+
 ### Ouery
+#### Detail produktu
 ```php
 $result = $depoto->query('product', 
     ['id' => $id],
-    ['data' => ['id', 'name', 'ean', 'quantities' => ['field']]]);
-
+    ['data' => [
+        'id', 'name', 'ean', 'code', 
+        'quantities' => [
+            'depot' => ['id', 'name'], // Sklad
+            'quantityStock', // Množství na skladě
+            'quantityReservation', // Množství v rezervaci
+            'quantityAvailable', // Dostupné množství
+        ],
+        // a další viz GraphQL Explorer
+    ]]);
+```    
+#### Výpis produktů
+```php
 $result = $depoto->query('products', 
-    ['filters' => ['fulltext' => $search]],
-    ['items' => ['id', 'name', 'ean', 'quantities' => ['field']]]);
+    ['filters' => ['fulltext' => $search]], // Filtry
+    ['items' => [
+        'id', 'name', 'ean', 'code', 
+        'quantities' => [
+            'depot' => ['id', 'name'], // Sklad
+            'quantityStock', // Množství na skladě
+            'quantityReservation', // Množství v rezervaci
+            'quantityAvailable', // Dostupné množství
+        ]
+    ]]);
+```    
 
+#### Detail objednávky
+* [Seznam procesních stávů, kterými mohou objednávky procházet](https://github.com/TomAtomCZ/depotoPhpClient/wiki/Procesn%C3%AD-stavy-objedn%C3%A1vky)
+
+```php
 $result = $depoto->query('order', 
     ['id' => $id],
     ['data' => [
-        'id', 'processStatus' => ['id', 'name', 'note', 'created'], 
-        'quantities' => ['field']
+        'id', 'reservationNumber' 
+        'processStatus' => ['id', 'name', 'note', 'created'], // Aktuální procesní stav,  
+        'items' => ['name', 'amount'],
+        'paymentItems' => ['name', 'amount', 'currency'],
+        'carrier' => ['id', 'name'],
+        'externalId'
     ]]);
-
+```    
+#### Výpis objednávek
+```php
 $result = $depoto->query('orders', 
     ['filters' => ['fulltext' => $search]],
-    ['items' => ['id', 'name', 'ean', 'quantities' => ['field']]]);
+    ['items' => [
+        'id', 'reservationNumber' 
+        'processStatus' => ['id', 'name', 'note', 'created'],   
+        'items' => ['name', 'amount'],
+        'paymentItems' => ['name', 'amount', 'currency'],
+        'carrier' => ['id', 'name'],
+        'externalId'
+    ]]);
 ```
 
 ### Mutation
