@@ -3,6 +3,7 @@
     "type": "library",
     "description": "Depoto API client",
     "keywords": ["depoto", "wms", "fullfilment", "api"],
+    "homepage": "https://depoto.cz/",
     "license": "MIT",
     "autoload": {
         "psr-4": {"Depoto\\": "src/"},

@@ -4,8 +4,16 @@
 Depoto je skladový, expediční a pokladní systém poskytující GraphQl API s OAuth2 authentifikací.
 Tato knihovna má za cíl práci s API zpříjemnit;) 
 
-### Použití
+### Instalace
 
+Doporučujeme instalaci pomocí
+[Composer](https://getcomposer.org/):
+
+```bash
+composer require tomatom/depoto-php-client
+```
+
+### Použití
 ```php
 use Depoto\Client;
 use Monolog\Handler\StreamHandler;
