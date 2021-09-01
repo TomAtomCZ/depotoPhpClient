@@ -22,8 +22,8 @@ class ClientTest extends TestCase
         $depotoClient = new Client($httpClient, $psr17Factory, $psr17Factory, $cache, $logger);
         $depotoClient
             ->setBaseUrl('https://server-dev.depoto.cz/app_dev.php')
-            ->setUsername('tom@tomatom.cz')
-            ->setPassword('jamie oliver');
+            ->setUsername('test@depoto.cz')
+            ->setPassword('besttest');
 
         return $depotoClient;
     }
