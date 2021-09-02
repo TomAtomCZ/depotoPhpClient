@@ -259,7 +259,7 @@ class Client
 
     protected function getOAuthDataCacheKey(): string
     {
-        return 'depoto-oauth-'.$this->username;
+        return 'depoto-oauth-'.md5($this->username);
     }
 
     public function isAuthenticated(): bool
