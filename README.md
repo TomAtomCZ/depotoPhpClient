@@ -34,7 +34,7 @@ $depoto
     ->setUsername('username')
     ->setPassword('password');
 ```
-Pokud se z vaší aplikace potřebujetepřipojovat k různým účtů, možná vašemu service containeru příjde vhod továrna: 
+Pokud se z vaší aplikace potřebujete připojovat k různým účtů, možná vašemu service containeru příjde vhod továrna: 
 ```php
 use Depoto\ClientFactory;
 
