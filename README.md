@@ -192,7 +192,8 @@ $result = $depoto->mutation('createOrder',
 ```php
 $result = $depoto->mutation('createOrderItem', 
     [
-        'product' => 123
+        'order' => 123,
+        'product' => 123,
         'amount' => 5,
         'price' => 31.5,
         'vat' => 666,
@@ -212,7 +213,7 @@ $result = $depoto->mutation('updateOrderItem',
 ```php        
 $result = $depoto->mutation('deleteOrderItem', 
     ['id' => $id],
-    ['errors']]);    
+    ['errors']);    
 ```
 #### Úprava objednávky
 ```php    
