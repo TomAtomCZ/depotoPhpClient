@@ -20,12 +20,8 @@ use Psr\SimpleCache\CacheInterface;
 
 class Client
 {
-    /**
-     * knmknmknmk
-     * @var string
-     */
-    protected string $clientId = '1_2rw1go4w8igw84g0ko488cs8c0ws4ccc8sgsc8ckgoo48ccco8';
-    protected string $clientSecret = '3lvk182vjscgcs4ws44sks88skgkowoc00ow084soc0oc0gg88';
+    protected string $clientId = '23_47gmzz2fhsw08gs0o480gks0o8c484kgw4sw0k00s0scsgs0cg';
+    protected string $clientSecret = '3jwvev86i30g4w0kckc4ss4gokc48sko4s884wsk0g44wcsg0w';
     protected string $baseUrl = 'https://server1.depoto.cz.tomatomstage.cz';
     protected string $username;
     protected string $password;
