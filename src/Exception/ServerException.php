@@ -29,8 +29,7 @@ class ServerException extends Exception
          * @todo
          * set $code
          */
-
-        parent::__construct(implode("\n", $this->errors));
+        parent::__construct(json_encode($this->errors));
     }
 
     /**
