@@ -42,7 +42,7 @@ $depotoFactory = new ClientFactory($httpClient, $psr17Factory, $psr17Factory, $c
 $depoto = $depotoFactory->createClient('username', 'password', 'https://server1.depoto.cz');
 ```
 ### GraphQl
- * Query pro čtení a Mutation pro zápis.
+ * Query pro čtení a Mutation pro czápis.
  * Definuji data (stromovou strukturu), která chci vrátit.
  * [GraphQL dokumentace](http://graphql.org/learn/)
  
@@ -149,6 +149,7 @@ $result = $depoto->mutation('createFile',
         'originalFilename' => 'původní název souboru.jpg',
         'mimeType' => 'image/jpeg',
         'product' => $productId, // ID produktu v Depotu
+        'base64Data' => '...', // jen base64 data bez mimeType na začátku
     ],
     ['data' => ['id']]);    
 ```
