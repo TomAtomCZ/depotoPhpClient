@@ -141,6 +141,17 @@ $result = $depoto->mutation('updateProduct',
     ],
     ['data' => ['id']]);
 ```
+#### Vytvoření souboru/obrázku
+```php
+$result = $depoto->mutation('createFile', 
+    [
+        'text' => 'Popis souboru',
+        'originalFilename' => 'původní název souboru.jpg',
+        'mimeType' => 'image/jpeg',
+        'product' => $productId, // ID produktu v Depotu
+    ],
+    ['data' => ['id']]);    
+```
 #### Vytvoření zákazníka
 ```php
 $resultCustomer = $depoto->mutation('createCustomer', 
