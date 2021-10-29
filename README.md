@@ -19,13 +19,13 @@ use Depoto\Client;
 use Monolog\Handler\StreamHandler;
 use Monolog\Logger;
 use Nyholm\Psr7\Factory\Psr17Factory;
-use Symfony\Component\Cache\Adapter\ApcuAdapter;
+use Symfony\Component\Cache\Adapter\ArrayAdapter;
 use Symfony\Component\Cache\Psr16Cache;
 use Symfony\Component\HttpClient\Psr18Client;
 
 $httpClient = new Psr18Client(); // PSR-18 Http client
 $psr17Factory = new Psr17Factory(); // PSR-17 HTTP Factories,  PSR-7 HTTP message
-$cache = new Psr16Cache(new ApcuAdapter('Depoto')); // PSR-16 Simple cache
+$cache = new Psr16Cache(new ArrayAdapter()); // PSR-16 Simple cache
 $logger = new Logger('Depoto', [new StreamHandler('depoto.log', Logger::DEBUG)]); // PSR-3 Logger
 
 $depoto = new Client($httpClient, $psr17Factory, $psr17Factory, $cache, $logger);
