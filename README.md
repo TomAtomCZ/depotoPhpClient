@@ -4,20 +4,28 @@
 Depoto je skladový, expediční a pokladní systém poskytující GraphQl API s OAuth2 authentifikací.
 Tato knihovna má za cíl práci s API zpříjemnit;) 
 
-### Použití
+### Instalace
 
+Doporučujeme instalaci pomocí
+[Composer](https://getcomposer.org/):
+
+```bash
+composer require tomatom/depoto-php-client
+```
+
+### Použití
 ```php
 use Depoto\Client;
 use Monolog\Handler\StreamHandler;
 use Monolog\Logger;
 use Nyholm\Psr7\Factory\Psr17Factory;
-use Symfony\Component\Cache\Adapter\ApcuAdapter;
+use Symfony\Component\Cache\Adapter\ArrayAdapter;
 use Symfony\Component\Cache\Psr16Cache;
 use Symfony\Component\HttpClient\Psr18Client;
 
 $httpClient = new Psr18Client(); // PSR-18 Http client
 $psr17Factory = new Psr17Factory(); // PSR-17 HTTP Factories,  PSR-7 HTTP message
-$cache = new Psr16Cache(new ApcuAdapter('Depoto')); // PSR-16 Simple cache
+$cache = new Psr16Cache(new ArrayAdapter()); // PSR-16 Simple cache
 $logger = new Logger('Depoto', [new StreamHandler('depoto.log', Logger::DEBUG)]); // PSR-3 Logger
 
 $depoto = new Client($httpClient, $psr17Factory, $psr17Factory, $cache, $logger);
@@ -26,7 +34,7 @@ $depoto
     ->setUsername('username')
     ->setPassword('password');
 ```
-Pokud se z vaší aplikace potřebujetepřipojovat k různým účtů, možná vašemu service containeru příjde vhod továrna: 
+Pokud se z vaší aplikace potřebujete připojovat k různým účtů, možná vašemu service containeru příjde vhod továrna: 
 ```php
 use Depoto\ClientFactory;
 
@@ -34,7 +42,7 @@ $depotoFactory = new ClientFactory($httpClient, $psr17Factory, $psr17Factory, $c
 $depoto = $depotoFactory->createClient('username', 'password', 'https://server1.depoto.cz');
 ```
 ### GraphQl
- * Query pro čtení a Mutation pro zápis.
+ * Query pro čtení a Mutation pro czápis.
  * Definuji data (stromovou strukturu), která chci vrátit.
  * [GraphQL dokumentace](http://graphql.org/learn/)
  
@@ -133,6 +141,18 @@ $result = $depoto->mutation('updateProduct',
     ],
     ['data' => ['id']]);
 ```
+#### Vytvoření souboru/obrázku
+```php
+$result = $depoto->mutation('createFile', 
+    [
+        'text' => 'Popis souboru',
+        'originalFilename' => 'původní název souboru.jpg',
+        'mimeType' => 'image/jpeg',
+        'product' => $productId, // ID produktu v Depotu
+        'base64Data' => '...', // jen base64 data bez mimeType na začátku
+    ],
+    ['data' => ['id']]);    
+```
 #### Vytvoření zákazníka
 ```php
 $resultCustomer = $depoto->mutation('createCustomer', 
@@ -184,7 +204,8 @@ $result = $depoto->mutation('createOrder',
 ```php
 $result = $depoto->mutation('createOrderItem', 
     [
-        'product' => 123
+        'order' => 123,
+        'product' => 123,
         'amount' => 5,
         'price' => 31.5,
         'vat' => 666,
@@ -204,7 +225,7 @@ $result = $depoto->mutation('updateOrderItem',
 ```php        
 $result = $depoto->mutation('deleteOrderItem', 
     ['id' => $id],
-    ['errors']]);    
+    ['errors']);    
 ```
 #### Úprava objednávky
 ```php    
