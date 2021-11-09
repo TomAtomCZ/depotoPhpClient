@@ -192,7 +192,7 @@ $result = $depoto->mutation('createOrder',
         'currency' => 'CZK',
         'carrier' => 'ppl',
         'items' => [
-            ['product' => 123, 'quantity' => 2],
+            ['product' => 123, 'quantity' => 2, 'price' => 123.45],
         ],
         'paymentItems' => [
             ['payment' => 789, 'amount' => 589.5],
@@ -234,7 +234,7 @@ $result = $depoto->mutation('updateOrder',
         'id' => $id,
         'shippingAddress' => 753951, // Změna doručovací adresy
         'items' => [
-            ['product' => 123, 'quantity' => 2], // Nové položky
+            ['product' => 123, 'quantity' => 2, 'price' => 123.45], // Nové položky
         ],
         'paymentItems' => [
             ['payment' => 789, 'amount' => 589.5],
