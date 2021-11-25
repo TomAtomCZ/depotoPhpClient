@@ -16,7 +16,7 @@
         "php": ">=7.4",
         "ext-json": "*",
         "himik/simple-graphql-query-builder": "^0.2.4",
-        "psr/log": "^1.1",
+        "psr/log": ">=1.1",
         "psr/log-implementation": "*",
         "psr/http-client": "^1.0",
         "psr/http-client-implementation": "*",
