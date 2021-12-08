@@ -68,6 +68,9 @@ class Client
         $res = json_decode((string)$res->getBody(), true);
 
         if(isset($res['errors'])){
+            if(count($res['errors']) == 1 && isset($res['errors'][0]['message'])) {
+                throw new Exception($res['errors'][0]['message']);
+            }
             throw new Exception(json_encode($res['errors']));
         }
         elseif(isset($res['data'][$method])) {
@@ -102,6 +105,9 @@ class Client
         $res = json_decode((string)$res->getBody(), true);
 
         if(isset($res['errors'])){
+            if(count($res['errors']) == 1 && isset($res['errors'][0]['message'])) {
+                throw new Exception($res['errors'][0]['message']);
+            }
             throw new Exception(json_encode($res['errors']));
         }
         elseif(isset($res['data'][$method])) {
