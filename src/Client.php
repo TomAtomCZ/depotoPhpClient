@@ -287,7 +287,7 @@ class Client
         return $this->lastResponse;
     }
 
-    protected function encode($data)
+    public static function encode($data)
     {
         if(is_array($data)) {
             foreach($data as $k => $d) {
@@ -301,7 +301,7 @@ class Client
                     continue;
                 }
                 if(is_array($d)) {
-                    $data[$k] = $this->encode($d);
+                    $data[$k] = self::encode($d);
                 }
                 else {
                     $data[$k] = urlencode($d);
@@ -315,7 +315,7 @@ class Client
         return $data;
     }
 
-    protected function decode($data)
+    public static function decode($data)
     {
         if(is_array($data)) {
             foreach($data as $k => $d) {
@@ -329,7 +329,7 @@ class Client
                     continue;
                 }
                 if(is_array($d)) {
-                    $data[$k] = $this->decode($d);
+                    $data[$k] = self::decode($d);
                 }
                 else {
                     $data[$k] = urldecode($d);

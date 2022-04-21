@@ -17,19 +17,37 @@ class ErrorException extends Exception
         $this->response = $response;
 
         $res = json_decode((string)$response->getBody(), true);
+
         if(isset($res['error'])) {
             $this->errors[] = $res['error'];
         }
 
         if(isset($res['errors'])) {
-            $this->errors[] = $res['errors'];
+            if(is_array($res['errors'])) {
+                foreach ($res['errors'] as $error) {
+                    $this->errors[] = $error;
+                }
+            }
+            else {
+                $this->errors[] = $res['errors'];
+            }
+        }
+
+        if(isset($res['data'])) {
+            foreach ($res['data'] as $key => $data) {
+                if(isset($data['errors']) && count($data['errors']) > 0) {
+                    foreach($data['errors'] as $error) {
+                        $this->errors[] = $error;
+                    }
+                }
+            }
         }
 
         /**
          * @todo
          * set $code
          */
-        parent::__construct(json_encode($this->errors));
+        parent::__construct(implode("\n", $this->errors));
     }
 
     /**
