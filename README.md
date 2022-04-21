@@ -19,13 +19,13 @@ use Depoto\Client;
 use Monolog\Handler\StreamHandler;
 use Monolog\Logger;
 use Nyholm\Psr7\Factory\Psr17Factory;
-use Symfony\Component\Cache\Adapter\ApcuAdapter;
+use Symfony\Component\Cache\Adapter\ArrayAdapter;
 use Symfony\Component\Cache\Psr16Cache;
 use Symfony\Component\HttpClient\Psr18Client;
 
 $httpClient = new Psr18Client(); // PSR-18 Http client
 $psr17Factory = new Psr17Factory(); // PSR-17 HTTP Factories,  PSR-7 HTTP message
-$cache = new Psr16Cache(new ApcuAdapter('Depoto')); // PSR-16 Simple cache
+$cache = new Psr16Cache(new ArrayAdapter()); // PSR-16 Simple cache
 $logger = new Logger('Depoto', [new StreamHandler('depoto.log', Logger::DEBUG)]); // PSR-3 Logger
 
 $depoto = new Client($httpClient, $psr17Factory, $psr17Factory, $cache, $logger);
@@ -42,7 +42,7 @@ $depotoFactory = new ClientFactory($httpClient, $psr17Factory, $psr17Factory, $c
 $depoto = $depotoFactory->createClient('username', 'password', 'https://server1.depoto.cz');
 ```
 ### GraphQl
- * Query pro čtení a Mutation pro zápis.
+ * Query pro čtení a Mutation pro czápis.
  * Definuji data (stromovou strukturu), která chci vrátit.
  * [GraphQL dokumentace](http://graphql.org/learn/)
  
@@ -141,6 +141,18 @@ $result = $depoto->mutation('updateProduct',
     ],
     ['data' => ['id']]);
 ```
+#### Vytvoření souboru/obrázku
+```php
+$result = $depoto->mutation('createFile', 
+    [
+        'text' => 'Popis souboru',
+        'originalFilename' => 'původní název souboru.jpg',
+        'mimeType' => 'image/jpeg',
+        'product' => $productId, // ID produktu v Depotu
+        'base64Data' => '...', // jen base64 data bez mimeType na začátku
+    ],
+    ['data' => ['id']]);    
+```
 #### Vytvoření zákazníka
 ```php
 $resultCustomer = $depoto->mutation('createCustomer', 
@@ -180,7 +192,7 @@ $result = $depoto->mutation('createOrder',
         'currency' => 'CZK',
         'carrier' => 'ppl',
         'items' => [
-            ['product' => 123, 'amount' => 2],
+            ['product' => 123, 'quantity' => 2, 'price' => 123.45],
         ],
         'paymentItems' => [
             ['payment' => 789, 'amount' => 589.5],
@@ -194,7 +206,7 @@ $result = $depoto->mutation('createOrderItem',
     [
         'order' => 123,
         'product' => 123,
-        'amount' => 5,
+        'quantity' => 5,
         'price' => 31.5,
         'vat' => 666,
     ],
@@ -205,7 +217,7 @@ $result = $depoto->mutation('createOrderItem',
 $result = $depoto->mutation('updateOrderItem', 
     [
         'id' => $id,
-        'amount' => 5,
+        'quantity' => 5,
     ],
     ['data' => ['id']]);    
 ```
@@ -222,7 +234,7 @@ $result = $depoto->mutation('updateOrder',
         'id' => $id,
         'shippingAddress' => 753951, // Změna doručovací adresy
         'items' => [
-            ['product' => 123, 'amount' => 2], // Nové položky
+            ['product' => 123, 'quantity' => 2, 'price' => 123.45], // Nové položky
         ],
         'paymentItems' => [
             ['payment' => 789, 'amount' => 589.5],
