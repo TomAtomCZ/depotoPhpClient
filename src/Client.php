@@ -165,7 +165,7 @@ class Client
         if($statusCode >= 200 && $statusCode < 400) {
             $res = json_decode($responseBody, true);
             $res = $this->decode($res);
-            if(isset($res['error']) || isset($res['errors']) || isset($res['data'][$method]['errors'])) {
+            if(isset($res['error']) || isset($res['errors']) || !empty($res['data'][$method]['errors'])) {
                 $this->logger->warning('GQLError: '.$responseBody, [$url, $body]);
                 throw new ErrorException($this->lastRequest, $this->lastResponse);
             }
