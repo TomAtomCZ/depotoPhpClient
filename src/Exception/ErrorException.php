@@ -25,6 +25,9 @@ class ErrorException extends Exception
         if(isset($res['errors'])) {
             if(is_array($res['errors'])) {
                 foreach ($res['errors'] as $error) {
+                    if(is_array($error) && isset($error['message'])) {
+                        $error = $error['message'];
+                    }
                     $this->errors[] = $error;
                 }
             }
@@ -37,6 +40,9 @@ class ErrorException extends Exception
             foreach ($res['data'] as $key => $data) {
                 if(isset($data['errors']) && count($data['errors']) > 0) {
                     foreach($data['errors'] as $error) {
+                        if(is_array($error) && isset($error['message'])) {
+                            $error = $error['message'];
+                        }
                         $this->errors[] = $error;
                     }
                 }
