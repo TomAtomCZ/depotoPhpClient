@@ -195,7 +195,11 @@ $result = $depoto->mutation('createOrder',
             ['product' => 123, 'quantity' => 2, 'price' => 123.45],
         ],
         'paymentItems' => [
-            ['payment' => 789, 'amount' => 589.5],
+            [
+                'payment' => 789, 
+                'amount' => 589.5,
+                'isPaid' => true // Zaplaceno - ano/ne
+            ],
         ],
     ]
     ['data' => ['id']]);
@@ -237,7 +241,11 @@ $result = $depoto->mutation('updateOrder',
             ['product' => 123, 'quantity' => 2, 'price' => 123.45], // Nové položky
         ],
         'paymentItems' => [
-            ['payment' => 789, 'amount' => 589.5],
+            [
+                'payment' => 789, 
+                'amount' => 589.5,
+                'isPaid' => true // Zaplaceno - ano/ne
+            ],
         ],
     ],
     ['data' => ['id']]);
