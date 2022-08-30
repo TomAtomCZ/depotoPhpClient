@@ -192,7 +192,10 @@ $result = $depoto->mutation('createOrder',
         'currency' => 'CZK',
         'carrier' => 'ppl',
         'items' => [
-            ['product' => 123, 'quantity' => 2, 'price' => 123.45],
+            ['product' => 123, 'type' => 'product', 'quantity' => 2, 'price' => 123.45], // name na produktu je nepovinný, Depoto si jej dotáhne.
+            ['name' => 'Volná položka servisní poplatek', 'type' => 'product', 'quantity' => 1, 'price' => 666], // Volná položka
+            ['name' => 'Doprava za stovku', 'type' => 'shipping', 'quantity' => 1, 'price' => 100],
+            ['name' => 'Dobírka za dvacku', 'type' => 'payment', 'quantity' => 1, 'price' => 20],
         ],
         'paymentItems' => [
             [
@@ -239,6 +242,7 @@ $result = $depoto->mutation('updateOrder',
         'shippingAddress' => 753951, // Změna doručovací adresy
         'items' => [
             ['product' => 123, 'quantity' => 2, 'price' => 123.45], // Nové položky
+            // items a typy obdobně viz createOrder
         ],
         'paymentItems' => [
             [
