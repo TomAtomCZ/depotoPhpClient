@@ -200,9 +200,30 @@ $result = $depoto->mutation('createOrder',
                 'price' => 123.45, 
                 'vat' => 12345
             ], // name na produktu je nepovinný, Depoto si jej dotáhne.
-            ['code' => 'volna1', 'name' => 'Volná položka servisní poplatek', 'type' => 'product', 'quantity' => 1, 'price' => 666, 'vat' => 12345], // Volná položka
-            ['code' => 'doprava', 'name' => 'Doprava za stovku', 'type' => 'shipping', 'quantity' => 1, 'price' => 100, 'vat' => 12345],
-            ['code' => 'platba', 'name' => 'Dobírka za dvacku', 'type' => 'payment', 'quantity' => 1, 'price' => 20, 'vat' => 12345],
+            [
+                'code' => 'volna1', 
+                'name' => 'Volná položka servisní poplatek', 
+                'type' => 'product', 
+                'quantity' => 1, 
+                'price' => 666, 
+                'vat' => 12345
+            ], // Volná položka
+            [
+                'code' => 'doprava', 
+                'name' => 'Doprava za stovku', 
+                'type' => 'shipping', 
+                'quantity' => 1, 
+                'price' => 100, 
+                'vat' => 12345
+            ],
+            [
+                'code' => 'platba', 
+                'name' => 'Dobírka za dvacku',
+                'type' => 'payment', 
+                'quantity' => 1, 
+                'price' => 20, 
+                'vat' => 12345
+            ],
         ],
         'paymentItems' => [
             [
