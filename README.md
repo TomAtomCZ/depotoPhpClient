@@ -195,9 +195,20 @@ $result = $depoto->mutation('createOrder',
             [
                 'product' => 123, 
                 'code' => 'ABCD', 
+                'name' => 'Název produktu', 
                 'type' => 'product', 
                 'quantity' => 2, 
-                'price' => 123.45, 
+                'price' => 123.45, // cena s DPH
+                'vat' => 12345
+            ], // name na produktu je nepovinný, Depoto si jej dotáhne. Je však doporučené jej posílat.
+            [
+                'product' => 456, 
+                'code' => 'XYZ', 
+                'name' => 'Název zlevněného produktu', 
+                'type' => 'product', 
+                'quantity' => 2, 
+                'sale' => 20, // 20% sleva 
+                'price' => 123.45, // základní cena s DPH před slevou 
                 'vat' => 12345
             ], // name na produktu je nepovinný, Depoto si jej dotáhne.
             [
@@ -229,7 +240,7 @@ $result = $depoto->mutation('createOrder',
             [
                 'payment' => 789, 
                 'amount' => 589.5,
-                'isPaid' => true // Zaplaceno - ano/ne
+                'isPaid' => true // Zaplaceno - true/false
             ],
         ],
     ]
@@ -243,6 +254,7 @@ $result = $depoto->mutation('createOrderItem',
         'product' => 123,
         'quantity' => 5,
         'price' => 31.5,
+        'sale' => 10, // 10% z výše uvedené ceny s DPH
         'vat' => 666,
     ],
     ['data' => ['id']]);
