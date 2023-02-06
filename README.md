@@ -177,7 +177,7 @@ $resultAddress = $depoto->mutation('createAddress',
         'city' => 'Město',
         'zip' => '28903',
         'country' => 'CZ', // ISO 3166-1 alpha-2 country code
-        'branchId' => 123456, // Nepovinné, identifikátor pobočky např. výdejny pro zásilkovnu.
+        'branchId' => 123456, // Nepovinné, identifikátor pobočky např. výdejny pro zásilkovnu, balíkovnu a ostatní výdejny.
         'isStored' => 0, // 0/1 ... 0 pro jednorázové adresy určené pro createOrder. 1 pokud zakládáte adresu pro zákazníka (spolu s createCustomer) a chcete, aby šlo o výchozí adresu, se kterou se bude pracovat na kartě zákaznníka = půjde vybrat do dopravy či platby. V takovém případě je nutné vyplnit pole customer
         'isBilling' => 0, // 0/1 ... 0 = doručovací adresa, 1 = fakturační adresa 
     ],
