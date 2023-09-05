@@ -153,6 +153,7 @@ class Client
         $this->lastRequest = $this->requestFactory->createRequest('POST', $url)
             ->withHeader('Content-Type', 'application/json; charset=utf-8')
             ->withHeader('Accept', 'application/json')
+            ->withHeader('Accept-Encoding', '*')
             ->withHeader('Authorization', 'Bearer ' . $this->getAccessToken())
             ->withBody($this->streamFactory->createStream($body));
 
@@ -211,6 +212,7 @@ class Client
         $body = http_build_query($vars);
         $url = $this->getEndpointUri('/oauth/v2/token');
         $this->lastRequest = $this->requestFactory->createRequest('POST', $url)
+            ->withHeader('Accept-Encoding', '*')
             ->withHeader('Content-Type', 'application/x-www-form-urlencoded; charset=utf-8')
             ->withBody($this->streamFactory->createStream($body));
 
