@@ -324,6 +324,9 @@ class Client
                 if(in_array($k, ['pkcs12', 'base64Data'])) {
                     continue;
                 }
+                if (is_null($d)) {
+                    continue;
+                }
                 if(is_bool($d)) {
                     continue;
                 }
