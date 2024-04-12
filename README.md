@@ -191,6 +191,7 @@ $result = $depoto->mutation('createOrder',
         'customer' => $resultCustomer['data']['id'], // Nepovinné
         'invoiceAddress' => $resultAddress['data']['id']],
         'shippingAddress' => $resultAddress['data']['id']],
+        'checkout' => 123, // ID pokladny daného eshopu
         'currency' => 'CZK',
         'carrier' => 'ppl',
         'items' => [
