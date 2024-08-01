@@ -72,7 +72,7 @@ $result = $depoto->query('product',
             'quantityAvailable', // Dostupné množství
         ],
         // a další viz GraphQL Explorer
-    ]]);
+    ], 'errors']);
 ```    
 #### Výpis produktů
 ```php
@@ -102,7 +102,7 @@ $result = $depoto->query('order',
         'paymentItems' => ['name', 'amount', 'currency'],
         'carrier' => ['id', 'name'],
         'externalId'
-    ]]);
+    ], 'errors']);
 ```    
 #### Výpis objednávek
 ```php
@@ -130,7 +130,7 @@ $result = $depoto->mutation('createProduct',
         'purchasePrice' => 99.9, // Nepovinné, výchozí nákupní cena
         'externalId' => 'vas-identifikator-123', // Nepovinné, externí identifikátor
     ],
-    ['data' => ['id']]);
+    ['data' => ['id'], 'errors']);
 ```
 #### Úprava produktu
 ```php
@@ -139,7 +139,7 @@ $result = $depoto->mutation('updateProduct',
         'id' => $id, // ID produktu v Depotu
         'name' => 'Nový název',
     ],
-    ['data' => ['id']]);
+    ['data' => ['id'], 'errors']);
 ```
 #### Vytvoření souboru/obrázku
 ```php
@@ -151,7 +151,7 @@ $result = $depoto->mutation('createFile',
         'product' => $productId, // ID produktu v Depotu
         'base64Data' => '...', // jen base64 data bez mimeType na začátku
     ],
-    ['data' => ['id']]);    
+    ['data' => ['id'], 'errors']);    
 ```
 #### Vytvoření zákazníka
 ```php
@@ -162,7 +162,7 @@ $resultCustomer = $depoto->mutation('createCustomer',
         'email' => 'email@email.cz',
         'phone' => '777123456',
     ],
-    ['data' => ['id']]);
+    ['data' => ['id'], 'errors']);
 ```
 #### Vytvoření adresy
 ```php
@@ -181,7 +181,7 @@ $resultAddress = $depoto->mutation('createAddress',
         'isStored' => 0, // 0/1 ... 0 pro jednorázové adresy určené pro createOrder. 1 pokud zakládáte adresu pro zákazníka (spolu s createCustomer) a chcete, aby šlo o výchozí adresu, se kterou se bude pracovat na kartě zákaznníka = půjde vybrat do dopravy či platby. V takovém případě je nutné vyplnit pole customer
         'isBilling' => 0, // 0/1 ... 0 = doručovací adresa, 1 = fakturační adresa 
     ],
-    ['data' => ['id']]);
+    ['data' => ['id'], 'errors']);
 ```
 #### Vytvoření objednávky
 ```php
@@ -247,7 +247,7 @@ $result = $depoto->mutation('createOrder',
             ],
         ],
     ]
-    ['data' => ['id']]);
+    ['data' => ['id'], 'errors']);
 ```
 #### Přidání položky do objednávky
 ```php
@@ -260,7 +260,7 @@ $result = $depoto->mutation('createOrderItem',
         'sale' => 10, // 10% z výše uvedené ceny s DPH
         'vat' => 666,
     ],
-    ['data' => ['id']]);
+    ['data' => ['id'], 'errors']);
 ```
 #### Úprava položky objednávky
 ```php    
@@ -269,7 +269,7 @@ $result = $depoto->mutation('updateOrderItem',
         'id' => $id,
         'quantity' => 5,
     ],
-    ['data' => ['id']]);    
+    ['data' => ['id'], 'errors']);    
 ```
 #### Smazání položky objednávky
 ```php        
@@ -295,7 +295,7 @@ $result = $depoto->mutation('updateOrder',
             ],
         ],
     ],
-    ['data' => ['id']]);
+    ['data' => ['id'], 'errors']);
 ```
 #### Zrušení rezervace
 Zručit jde jen objednávky ve stavu rezervace (status="reservation").
