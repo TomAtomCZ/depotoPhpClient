@@ -304,3 +304,25 @@ $result = $depoto->mutation('deleteReservation',
     ['id' => $id],
     ['errors']]);      
 ```
+#### Vytvoření skladového pohybu
+```php    
+$result = $depoto->mutation('createProductMovePack', 
+    [
+        'type' => "in", // "out" pro výdej, resp. "transfer" pro převodku
+        'moves' => [
+            [
+                'product' => 123,
+                'depotTo' => 666, // ID skladu. Pokud jde o type "out", použijte "depotFrom"
+                'amount' => 1,
+                'supplier' => 123, // ID dodavatele
+                'purchasePrice' => 10.01,
+                'purchaseCurrency' => 'CZK',
+                'note' => 'Sync'
+            ],
+            // moves pro další produkty v pohybu
+        ],
+    ],
+    ['data' => ['id'], 'errors']);
+```
+
+
