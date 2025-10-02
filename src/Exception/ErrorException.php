@@ -11,7 +11,7 @@ class ErrorException extends Exception
     protected ResponseInterface $response;
     protected array $errors = [];
 
-    public function __construct(RequestInterface $request, ResponseInterface $response)
+    public function __construct(RequestInterface $request, ResponseInterface $response, int $code = 0, ?\Throwable $previous = null)
     {
         $this->request = $request;
         $this->response = $response;
@@ -49,11 +49,7 @@ class ErrorException extends Exception
             }
         }
 
-        /**
-         * @todo
-         * set $code
-         */
-        parent::__construct(implode("\n", $this->errors));
+        parent::__construct(implode("\n", $this->errors), $code, $previous);
     }
 
     /**
@@ -70,5 +66,10 @@ class ErrorException extends Exception
     public function getResponse(): ResponseInterface
     {
         return $this->response;
+    }
+
+    public function getErrors(): array
+    {
+        return $this->errors;
     }
 }

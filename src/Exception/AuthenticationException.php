@@ -11,7 +11,7 @@ class AuthenticationException extends Exception
     protected ResponseInterface $response;
     protected array $errors = [];
 
-    public function __construct(RequestInterface $request, ResponseInterface $response)
+    public function __construct(RequestInterface $request, ResponseInterface $response, int $code = 0, ?\Throwable $previous = null)
     {
         $this->request = $request;
         $this->response = $response;
@@ -25,11 +25,7 @@ class AuthenticationException extends Exception
             $this->errors[] = $res['message'];
         }
 
-        /**
-         * @todo
-         * set $code
-         */
-        parent::__construct(json_encode($this->errors));
+        parent::__construct(json_encode($this->errors), $code, $previous);
     }
 
     /**
@@ -46,5 +42,10 @@ class AuthenticationException extends Exception
     public function getResponse(): ResponseInterface
     {
         return $this->response;
+    }
+
+    public function getErrors(): array
+    {
+        return $this->errors;
     }
 }
