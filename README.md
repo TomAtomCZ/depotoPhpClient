@@ -14,6 +14,8 @@ composer require tomatom/depoto-php-client
 ```
 
 ### Použití
+[Čtěte best practices ve WIKI !!!](https://github.com/TomAtomCZ/depotoPhpClient/wiki):
+
 ```php
 use Depoto\Client;
 use Monolog\Handler\StreamHandler;
