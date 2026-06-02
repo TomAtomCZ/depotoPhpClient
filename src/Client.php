@@ -122,6 +122,16 @@ class Client
         return $this->call('query', $method, $arguments, $body);
     }
 
+    public function batchMutation(array $operations, bool $throwOnOperationErrors = false): array
+    {
+        return $this->batchCall('mutation', $operations, $throwOnOperationErrors);
+    }
+
+    public function batchQuery(array $operations, bool $throwOnOperationErrors = false): array
+    {
+        return $this->batchCall('query', $operations, $throwOnOperationErrors);
+    }
+
     /**
      * @throws ClientExceptionInterface
      * @throws ErrorException
@@ -185,6 +195,189 @@ class Client
             $this->logger->error($statusCode.': '.$responseBody, [$url, $body]);
             throw new ServerException($this->lastRequest, $this->lastResponse);
         }
+    }
+
+    /**
+     * @throws ClientExceptionInterface
+     * @throws ErrorException
+     * @throws AuthenticationException
+     * @throws ServerException
+     */
+    public function batchCall(string $type, array $operations, bool $throwOnOperationErrors = false): array
+    {
+        if(!$this->isAuthenticated()) {
+            $this->authenticate();
+        }
+
+        $readyQuery = $this->buildBatchGraphqlDocument($type, $operations);
+        $url = $this->getEndpointUri('/graphql');
+        $body = json_encode(['query' => $readyQuery]);
+
+        $this->lastRequest = $this->requestFactory->createRequest('POST', $url)
+            ->withHeader('Content-Type', 'application/json; charset=utf-8')
+            ->withHeader('Accept', 'application/json')
+            ->withHeader('Accept-Encoding', '*')
+            ->withHeader('Authorization', 'Bearer ' . $this->getAccessToken())
+            ->withBody($this->streamFactory->createStream($body));
+
+        $this->logger->debug('GQLBatchRequest: '.$readyQuery, [$url]);
+        $this->lastResponse = $this->httpClient->sendRequest($this->lastRequest);
+        $responseBody = (string)$this->lastResponse->getBody();
+        $this->logger->debug('GQLBatchResponse: '.$responseBody, [$url]);
+        $statusCode = $this->lastResponse->getStatusCode();
+
+        if($statusCode >= 200 && $statusCode < 400) {
+            $res = json_decode($responseBody, true);
+            $res = $this->decode($res);
+            if(isset($res['error']) || isset($res['errors'])) {
+                $this->logger->warning('GQLBatchError: '.$responseBody, [$url, $body]);
+                throw new ErrorException($this->lastRequest, $this->lastResponse);
+            }
+
+            $data = $res['data'] ?? [];
+            if($throwOnOperationErrors) {
+                foreach($data as $alias => $operationResponse) {
+                    if(!empty($operationResponse['errors'])) {
+                        $this->logger->warning('GQLBatchOperationError: '.$responseBody, [$url, $body, $alias]);
+                        throw new ErrorException($this->lastRequest, $this->lastResponse);
+                    }
+                }
+            }
+
+            return $data;
+        }
+        elseif($statusCode >= 400 && $statusCode <= 403) {
+            $this->logger->warning($statusCode.': '.$responseBody, [$url, $body]);
+            throw new AuthenticationException($this->lastRequest, $this->lastResponse);
+        }
+        else {
+            $this->logger->error($statusCode.': '.$responseBody, [$url, $body]);
+            throw new ServerException($this->lastRequest, $this->lastResponse);
+        }
+    }
+
+    protected function buildBatchGraphqlDocument(string $type, array $operations): string
+    {
+        if(!in_array($type, ['query', 'mutation'])) {
+            throw new \InvalidArgumentException('Batch GraphQL type must be query or mutation.');
+        }
+
+        if(empty($operations)) {
+            throw new \InvalidArgumentException('At least one batch operation is required.');
+        }
+
+        $fields = [];
+        foreach($operations as $alias => $operation) {
+            if(!is_array($operation)) {
+                throw new \InvalidArgumentException('Each batch operation must be an array.');
+            }
+
+            if(is_int($alias)) {
+                $alias = $operation['alias'] ?? null;
+            }
+
+            if(!is_string($alias) || !$this->isValidGraphqlName($alias)) {
+                throw new \InvalidArgumentException('Each batch operation alias must be a valid GraphQL name.');
+            }
+
+            $method = $operation['method'] ?? null;
+            if(!is_string($method) || !$this->isValidGraphqlName($method)) {
+                throw new \InvalidArgumentException("Batch operation '{$alias}' has invalid method name.");
+            }
+
+            $arguments = $operation['arguments'] ?? [];
+            $body = $operation['body'] ?? [];
+            if(!is_array($arguments) || !is_array($body)) {
+                throw new \InvalidArgumentException("Batch operation '{$alias}' arguments and body must be arrays.");
+            }
+
+            if(isset($body['data']) && !in_array('errors', $body)) {
+                $body[] = 'errors';
+            }
+
+            $fields[] = sprintf(
+                '%s: %s%s%s',
+                $alias,
+                $method,
+                $this->buildGraphqlArgumentsString($arguments),
+                $this->buildGraphqlBodyString($body)
+            );
+        }
+
+        return sprintf("%s {\n%s\n}", $type, implode("\n", $fields));
+    }
+
+    protected function buildGraphqlArgumentsString(array $arguments): string
+    {
+        if(empty($arguments)) {
+            return '';
+        }
+
+        $encodedArguments = $this->encode($arguments);
+        $argumentKeys = [];
+        $enumValues = [];
+        $this->collectGraphqlArgumentMetadata($encodedArguments, $argumentKeys, $enumValues);
+
+        $args = json_encode($encodedArguments, JSON_UNESCAPED_UNICODE);
+        $args = sprintf('(%s)', substr($args, 1, strlen($args) - 2));
+
+        foreach($argumentKeys as $argumentKey) {
+            $args = str_replace(sprintf('"%s":', $argumentKey), sprintf('%s:', $argumentKey), $args);
+        }
+
+        foreach($enumValues as $enumValue) {
+            $args = str_replace(sprintf('"%s"', $enumValue), $enumValue, $args);
+        }
+
+        return $args;
+    }
+
+    protected function collectGraphqlArgumentMetadata(array $arguments, array &$argumentKeys, array &$enumValues): void
+    {
+        foreach($arguments as $argumentName => $argumentValue) {
+            if(is_string($argumentName) && !is_numeric($argumentName)) {
+                $argumentKeys[$argumentName] = $argumentName;
+            }
+
+            if(is_array($argumentValue)) {
+                $this->collectGraphqlArgumentMetadata($argumentValue, $argumentKeys, $enumValues);
+            }
+            elseif(is_string($argumentValue) && $argumentValue === strtoupper($argumentValue) && strpos($argumentValue, 'ENUM_') !== false) {
+                $enumValues[$argumentValue] = $argumentValue;
+            }
+        }
+    }
+
+    protected function buildGraphqlBodyString(array $body): string
+    {
+        if(empty($body)) {
+            return '';
+        }
+
+        $bodyString = " {\n";
+        $this->appendGraphqlBodyFields($body, $bodyString);
+        $bodyString .= "}\n";
+
+        return $bodyString;
+    }
+
+    protected function appendGraphqlBodyFields(array $fields, string &$bodyString): void
+    {
+        foreach($fields as $key => $field) {
+            if(is_int($key)) {
+                $bodyString .= $field . "\n";
+            }
+            elseif(is_string($key) && is_array($field)) {
+                $bodyString .= $key . " {\n";
+                $this->appendGraphqlBodyFields($field, $bodyString);
+                $bodyString .= "}\n";
+            }
+        }
+    }
+
+    protected function isValidGraphqlName(string $name): bool
+    {
+        return preg_match('/^[A-Za-z_][A-Za-z0-9_]*$/', $name) === 1;
     }
 
     /**
