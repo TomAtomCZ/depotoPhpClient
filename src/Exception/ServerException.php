@@ -17,14 +17,19 @@ class ServerException extends Exception
         $this->response = $response;
 
         $res = json_decode((string)$response->getBody(), true);
-        if (isset($res['error'])) {
-            $this->errors[] = $res['error'];
-        }
-        if (isset($res['errors'])) {
-            $this->errors[] = $res['errors'];
-        }
-        if (isset($res['message'])) {
-            $this->errors[] = $res['message'];
+
+        if ($res) {
+            if (isset($res['error'])) {
+                $this->errors[] = $res['error'];
+            }
+            if (isset($res['errors'])) {
+                $this->errors[] = $res['errors'];
+            }
+            if (isset($res['message'])) {
+                $this->errors[] = $res['message'];
+            }
+        } else {
+            $this->errors[] = $code . ' ' . $response->getReasonPhrase();
         }
 
         parent::__construct(json_encode($this->errors), $code, $previous);

@@ -178,7 +178,7 @@ class Client
             $res = $this->decode($res);
             if(isset($res['error']) || isset($res['errors']) || !empty($res['data'][$method]['errors'])) {
                 $this->logger->warning('GQLError: '.$responseBody, [$url, $body]);
-                throw new ErrorException($this->lastRequest, $this->lastResponse);
+                throw new ErrorException($this->lastRequest, $this->lastResponse, $statusCode);
             }
             elseif(isset($res['data'][$method])) {
                 return $res['data'][$method];
@@ -189,11 +189,11 @@ class Client
         }
         elseif($statusCode >= 400 && $statusCode <= 403) {
             $this->logger->warning($statusCode.': '.$responseBody, [$url, $body]);
-            throw new AuthenticationException($this->lastRequest, $this->lastResponse);
+            throw new AuthenticationException($this->lastRequest, $this->lastResponse, $statusCode);
         }
         else {
             $this->logger->error($statusCode.': '.$responseBody, [$url, $body]);
-            throw new ServerException($this->lastRequest, $this->lastResponse);
+            throw new ServerException($this->lastRequest, $this->lastResponse, $statusCode);
         }
     }
 
@@ -231,7 +231,7 @@ class Client
             $res = $this->decode($res);
             if(isset($res['error']) || isset($res['errors'])) {
                 $this->logger->warning('GQLBatchError: '.$responseBody, [$url, $body]);
-                throw new ErrorException($this->lastRequest, $this->lastResponse);
+                throw new ErrorException($this->lastRequest, $this->lastResponse, $statusCode);
             }
 
             $data = $res['data'] ?? [];
@@ -239,7 +239,7 @@ class Client
                 foreach($data as $alias => $operationResponse) {
                     if(!empty($operationResponse['errors'])) {
                         $this->logger->warning('GQLBatchOperationError: '.$responseBody, [$url, $body, $alias]);
-                        throw new ErrorException($this->lastRequest, $this->lastResponse);
+                        throw new ErrorException($this->lastRequest, $this->lastResponse, $statusCode);
                     }
                 }
             }
@@ -248,11 +248,11 @@ class Client
         }
         elseif($statusCode >= 400 && $statusCode <= 403) {
             $this->logger->warning($statusCode.': '.$responseBody, [$url, $body]);
-            throw new AuthenticationException($this->lastRequest, $this->lastResponse);
+            throw new AuthenticationException($this->lastRequest, $this->lastResponse, $statusCode);
         }
         else {
             $this->logger->error($statusCode.': '.$responseBody, [$url, $body]);
-            throw new ServerException($this->lastRequest, $this->lastResponse);
+            throw new ServerException($this->lastRequest, $this->lastResponse, $statusCode);
         }
     }
 
@@ -426,12 +426,12 @@ class Client
             }
             else {
                 $this->logger->warning($statusCode.': '.$responseBody, [$url, $body]);
-                throw new AuthenticationException($this->lastRequest, $this->lastResponse);
+                throw new AuthenticationException($this->lastRequest, $this->lastResponse, $statusCode);
             }
         }
         else {
             $this->logger->error($statusCode.': '.$responseBody, [$url, $body]);
-            throw new ServerException($this->lastRequest, $this->lastResponse);
+            throw new ServerException($this->lastRequest, $this->lastResponse, $statusCode);
         }
 
         return $this;
