@@ -166,6 +166,209 @@ class ClientTest extends TestCase
         $this->assertStringContainsString('items {', $query);
     }
 
+    public function testTokenIsNotAuthenticatedShortlyBeforeExpiration(): void
+    {
+        $cache = new InMemoryCache();
+        $client = $this->getBatchTestClient(new RecordingHttpClient([]), $cache);
+        $this->assertTrue($client->isAuthenticated());
+
+        $cacheKey = 'depoto-oauth-'.md5($client->getUsername());
+        $cache->set($cacheKey, ['expires_time' => time() + 50] + $cache->get($cacheKey));
+        $this->assertFalse($client->isAuthenticated());
+
+        $cache->set($cacheKey, ['expires_time' => time() - 50] + $cache->get($cacheKey));
+        $this->assertFalse($client->isAuthenticated());
+    }
+
+    public function testExpiringTokenIsRenewedAndUsedInSameInstance(): void
+    {
+        $cache = new InMemoryCache();
+        $httpClient = new RecordingHttpClient([
+            $this->createJsonResponse(200, ['data' => ['products' => ['items' => []]]]),
+            $this->createJsonResponse(200, ['access_token' => 'new-token', 'refresh_token' => 'new-refresh-token', 'expires_in' => 43200]),
+            $this->createJsonResponse(200, ['data' => ['products' => ['items' => []]]]),
+        ]);
+        $client = $this->getBatchTestClient($httpClient, $cache);
+
+        $client->query('products', [], ['items' => ['id']]);
+
+        $cacheKey = 'depoto-oauth-'.md5($client->getUsername());
+        $cache->set($cacheKey, ['expires_time' => time() + 50] + $cache->get($cacheKey));
+
+        $client->query('products', [], ['items' => ['id']]);
+
+        $this->assertCount(3, $httpClient->requests);
+        $this->assertSame('Bearer test-token', $httpClient->requests[0]->getHeaderLine('Authorization'));
+        $this->assertSame('https://example.test/oauth/v2/token', (string)$httpClient->requests[1]->getUri());
+        $this->assertSame('Bearer new-token', $httpClient->requests[2]->getHeaderLine('Authorization'));
+    }
+
+    public function testRejectedTokenIsRenewedAndRequestRetriedOnce(): void
+    {
+        $httpClient = new RecordingHttpClient([
+            // Real Depoto server response to an expired or unknown token
+            $this->createJsonResponse(401, ['message' => 'An authentication exception occurred.']),
+            $this->createJsonResponse(200, ['access_token' => 'new-token', 'refresh_token' => 'new-refresh-token', 'expires_in' => 43200]),
+            $this->createJsonResponse(200, ['data' => ['products' => ['items' => [['id' => '1']]]]]),
+        ]);
+
+        $result = $this->getBatchTestClient($httpClient, new InMemoryCache())
+            ->query('products', [], ['items' => ['id']]);
+
+        $this->assertSame([['id' => '1']], $result['items']);
+        $this->assertCount(3, $httpClient->requests);
+        $this->assertSame('Bearer test-token', $httpClient->requests[0]->getHeaderLine('Authorization'));
+        $this->assertSame('https://example.test/oauth/v2/token', (string)$httpClient->requests[1]->getUri());
+        $this->assertSame('Bearer new-token', $httpClient->requests[2]->getHeaderLine('Authorization'));
+        $this->assertSame((string)$httpClient->requests[0]->getBody(), (string)$httpClient->requests[2]->getBody());
+    }
+
+    public function testBatchCallThrowsAuthenticationExceptionWhenRetriedRequestIsRejected(): void
+    {
+        $httpClient = new RecordingHttpClient([
+            $this->createJsonResponse(401, ['error' => 'invalid_grant']),
+            $this->createJsonResponse(200, ['access_token' => 'new-token', 'refresh_token' => 'new-refresh-token', 'expires_in' => 43200]),
+            $this->createJsonResponse(401, ['error' => 'invalid_grant']),
+        ]);
+
+        try {
+            $this->getBatchTestClient($httpClient, new InMemoryCache())->batchQuery([
+                'productList' => ['method' => 'products', 'body' => ['items' => ['id']]],
+            ]);
+            $this->fail('AuthenticationException was not thrown.');
+        }
+        catch(AuthenticationException $e) {
+            $this->assertSame(401, $e->getCode());
+            $this->assertCount(3, $httpClient->requests);
+        }
+    }
+
+    public function testMutationIsNotRetriedWhenUnauthorizedResponseIsNotTokenRejection(): void
+    {
+        $psr17Factory = new Psr17Factory();
+        $httpClient = new RecordingHttpClient([
+            $psr17Factory->createResponse(401)
+                ->withHeader('WWW-Authenticate', 'Basic realm="server-dev"')
+                ->withBody($psr17Factory->createStream('<html>401 Authorization Required</html>')),
+        ]);
+
+        try {
+            $this->getBatchTestClient($httpClient, new InMemoryCache())
+                ->mutation('createProduct', ['name' => 'Product'], ['data' => ['id']]);
+            $this->fail('AuthenticationException was not thrown.');
+        }
+        catch(AuthenticationException $e) {
+            $this->assertSame(401, $e->getCode());
+            $this->assertCount(1, $httpClient->requests);
+        }
+    }
+
+    public function testMutationIsNotRetriedWhenUnauthorizedJsonResponseHasOtherMessage(): void
+    {
+        $httpClient = new RecordingHttpClient([
+            $this->createJsonResponse(401, ['message' => 'Access denied.']),
+        ]);
+
+        try {
+            $this->getBatchTestClient($httpClient, new InMemoryCache())
+                ->mutation('createProduct', ['name' => 'Product'], ['data' => ['id']]);
+            $this->fail('AuthenticationException was not thrown.');
+        }
+        catch(AuthenticationException $e) {
+            $this->assertSame(401, $e->getCode());
+            $this->assertCount(1, $httpClient->requests);
+        }
+    }
+
+    public function testTokenRejectedInWwwAuthenticateHeaderIsRenewedAndRequestRetried(): void
+    {
+        $psr17Factory = new Psr17Factory();
+        $httpClient = new RecordingHttpClient([
+            $psr17Factory->createResponse(401)
+                ->withHeader('WWW-Authenticate', 'Bearer realm="Service", error="invalid_token", error_description="The access token provided has expired."'),
+            $this->createJsonResponse(200, ['access_token' => 'new-token', 'refresh_token' => 'new-refresh-token', 'expires_in' => 43200]),
+            $this->createJsonResponse(200, ['data' => ['products' => ['items' => []]]]),
+        ]);
+
+        $this->getBatchTestClient($httpClient, new InMemoryCache())
+            ->query('products', [], ['items' => ['id']]);
+
+        $this->assertCount(3, $httpClient->requests);
+        $this->assertSame('https://example.test/oauth/v2/token', (string)$httpClient->requests[1]->getUri());
+        $this->assertSame('Bearer new-token', $httpClient->requests[2]->getHeaderLine('Authorization'));
+    }
+
+    public function testFailedReauthenticationThrowsExceptionForRejectedGraphqlRequest(): void
+    {
+        $httpClient = new RecordingHttpClient([
+            $this->createJsonResponse(401, ['error' => 'invalid_grant', 'error_description' => 'The access token provided has expired.']),
+            $this->createJsonResponse(400, ['error' => 'invalid_grant', 'error_description' => 'Invalid username and password combination']),
+        ]);
+
+        try {
+            $this->getBatchTestClient($httpClient, new InMemoryCache())
+                ->query('products', [], ['items' => ['id']]);
+            $this->fail('AuthenticationException was not thrown.');
+        }
+        catch(AuthenticationException $e) {
+            $this->assertSame(401, $e->getCode());
+            $this->assertSame('https://example.test/graphql', (string)$e->getRequest()->getUri());
+            $this->assertSame(401, $e->getResponse()->getStatusCode());
+            $this->assertCount(2, $httpClient->requests);
+        }
+    }
+
+    public function testTokenRenewedByAnotherClientIsUsedWithoutReauthenticating(): void
+    {
+        $cache = new InMemoryCache();
+        $httpClient = new RecordingHttpClient([
+            function() use ($cache, &$client) {
+                $this->setCachedAccessToken($cache, $client, 'other-client-token');
+                return $this->createJsonResponse(401, ['error' => 'invalid_grant', 'error_description' => 'The access token provided has expired.']);
+            },
+            $this->createJsonResponse(200, ['data' => ['products' => ['items' => []]]]),
+        ]);
+        $client = $this->getBatchTestClient($httpClient, $cache);
+
+        $client->query('products', [], ['items' => ['id']]);
+
+        $this->assertCount(2, $httpClient->requests);
+        $this->assertSame('Bearer test-token', $httpClient->requests[0]->getHeaderLine('Authorization'));
+        $this->assertSame('Bearer other-client-token', $httpClient->requests[1]->getHeaderLine('Authorization'));
+    }
+
+    public function testExistingInstanceSendsTokenRenewedByAnotherClient(): void
+    {
+        $cache = new InMemoryCache();
+        $httpClient = new RecordingHttpClient([
+            $this->createJsonResponse(200, ['data' => ['products' => ['items' => []]]]),
+            $this->createJsonResponse(200, ['data' => ['products' => ['items' => []]]]),
+        ]);
+        $client = $this->getBatchTestClient($httpClient, $cache);
+
+        $client->query('products', [], ['items' => ['id']]);
+        $this->setCachedAccessToken($cache, $client, 'other-client-token');
+        $client->query('products', [], ['items' => ['id']]);
+
+        $this->assertCount(2, $httpClient->requests);
+        $this->assertSame('Bearer test-token', $httpClient->requests[0]->getHeaderLine('Authorization'));
+        $this->assertSame('Bearer other-client-token', $httpClient->requests[1]->getHeaderLine('Authorization'));
+    }
+
+    private function setCachedAccessToken(InMemoryCache $cache, Client $client, string $accessToken): void
+    {
+        $cacheKey = 'depoto-oauth-'.md5($client->getUsername());
+        $cache->set($cacheKey, ['access_token' => $accessToken, 'expires_time' => time() + 3600] + $cache->get($cacheKey));
+    }
+
+    private function createJsonResponse(int $statusCode, array $data): ResponseInterface
+    {
+        $psr17Factory = new Psr17Factory();
+
+        return $psr17Factory->createResponse($statusCode)
+            ->withBody($psr17Factory->createStream(json_encode($data)));
+    }
+
     public function testBatchMutationCanThrowOnOperationErrors(): void
     {
         $psr17Factory = new Psr17Factory();
@@ -197,7 +400,7 @@ class RecordingHttpClient implements ClientInterface
     /** @var RequestInterface[] */
     public array $requests = [];
 
-    /** @var ResponseInterface[] */
+    /** @var ResponseInterface[]|callable[] Callable is invoked with the request and returns response */
     private array $responses;
 
     public function __construct(array $responses)
@@ -208,8 +411,9 @@ class RecordingHttpClient implements ClientInterface
     public function sendRequest(RequestInterface $request): ResponseInterface
     {
         $this->requests[] = $request;
+        $response = array_shift($this->responses);
 
-        return array_shift($this->responses);
+        return is_callable($response) ? $response($request) : $response;
     }
 }
 
