@@ -25,7 +25,6 @@ class Client
     protected string $baseUrl = 'https://server1.depoto.cz.tomatomstage.cz';
     protected string $username;
     protected string $password;
-    protected ?string $accessToken = null;
     protected ClientInterface $httpClient;
     protected RequestFactoryInterface $requestFactory;
     protected StreamFactoryInterface $streamFactory;
@@ -50,7 +49,6 @@ class Client
     public function setUsername(string $username): self
     {
         $this->username = $username;
-        $this->accessToken = null;
         return $this;
     }
 
@@ -103,13 +101,13 @@ class Client
         return $this->clientSecret;
     }
 
+    /**
+     * Always read from cache, so the token sent is the same one isAuthenticated() checks,
+     * including a token renewed by another client sharing the cache.
+     */
     protected function getAccessToken(): ?string
     {
-        if(!$this->accessToken) {
-            $this->accessToken = $this->getOAuthData()['access_token'];
-        }
-
-        return $this->accessToken;
+        return $this->getOAuthData()['access_token'] ?? null;
     }
 
     public function mutation(string $method, array $arguments, array $body): array
@@ -160,15 +158,8 @@ class Client
         $url = $this->getEndpointUri('/graphql');
         $body = json_encode(['query' => $readyQuery]);
 
-        $this->lastRequest = $this->requestFactory->createRequest('POST', $url)
-            ->withHeader('Content-Type', 'application/json; charset=utf-8')
-            ->withHeader('Accept', 'application/json')
-            ->withHeader('Accept-Encoding', '*')
-            ->withHeader('Authorization', 'Bearer ' . $this->getAccessToken())
-            ->withBody($this->streamFactory->createStream($body));
-
         $this->logger->debug('GQLRequest: '.$readyQuery, [$url]);
-        $this->lastResponse = $this->httpClient->sendRequest($this->lastRequest);
+        $this->sendGraphqlRequest($url, $body);
         $responseBody = (string)$this->lastResponse->getBody();
         $this->logger->debug('GQLResponse: '.$responseBody, [$url]);
         $statusCode = $this->lastResponse->getStatusCode();
@@ -213,15 +204,8 @@ class Client
         $url = $this->getEndpointUri('/graphql');
         $body = json_encode(['query' => $readyQuery]);
 
-        $this->lastRequest = $this->requestFactory->createRequest('POST', $url)
-            ->withHeader('Content-Type', 'application/json; charset=utf-8')
-            ->withHeader('Accept', 'application/json')
-            ->withHeader('Accept-Encoding', '*')
-            ->withHeader('Authorization', 'Bearer ' . $this->getAccessToken())
-            ->withBody($this->streamFactory->createStream($body));
-
         $this->logger->debug('GQLBatchRequest: '.$readyQuery, [$url]);
-        $this->lastResponse = $this->httpClient->sendRequest($this->lastRequest);
+        $this->sendGraphqlRequest($url, $body);
         $responseBody = (string)$this->lastResponse->getBody();
         $this->logger->debug('GQLBatchResponse: '.$responseBody, [$url]);
         $statusCode = $this->lastResponse->getStatusCode();
@@ -254,6 +238,86 @@ class Client
             $this->logger->error($statusCode.': '.$responseBody, [$url, $body]);
             throw new ServerException($this->lastRequest, $this->lastResponse, $statusCode);
         }
+    }
+
+    /**
+     * Sends GraphQL request with current access token. When the OAuth server rejects the token
+     * (e.g. it expired or server clocks differ), a new token is obtained and the request is retried once.
+     * The request is safe to retry then, because it was refused before being processed.
+     * Other 401 responses are returned as they are.
+     *
+     * @throws ClientExceptionInterface
+     */
+    protected function sendGraphqlRequest(string $url, string $body): ResponseInterface
+    {
+        $accessToken = $this->getAccessToken();
+        $this->lastRequest = $this->createGraphqlRequest($url, $body, $accessToken);
+        $this->lastResponse = $this->httpClient->sendRequest($this->lastRequest);
+
+        if(!$this->isAccessTokenRejected($this->lastResponse)) {
+            return $this->lastResponse;
+        }
+
+        $rejectedRequest = $this->lastRequest;
+        $rejectedResponse = $this->lastResponse;
+
+        // Another client sharing the cache may have renewed the token already
+        if($this->getAccessToken() === $accessToken) {
+            $this->logger->info('401: access token rejected, re-authenticating and retrying request', [$url]);
+            try {
+                $this->authenticate();
+            }
+            catch(AuthenticationException|ServerException $e) {
+                // Caller reports the rejected GraphQL request, not the failed token request
+                $this->lastRequest = $rejectedRequest;
+                $this->lastResponse = $rejectedResponse;
+                return $this->lastResponse;
+            }
+        }
+        else {
+            $this->logger->info('401: access token rejected, retrying request with token renewed in cache', [$url]);
+        }
+
+        $this->lastRequest = $this->createGraphqlRequest($url, $body, $this->getAccessToken());
+        $this->lastResponse = $this->httpClient->sendRequest($this->lastRequest);
+
+        return $this->lastResponse;
+    }
+
+    /**
+     * Token rejected by server: 401 with error invalid_token (RFC 6750) or invalid_grant (FOSOAuthServerBundle)
+     * sent in JSON body or in WWW-Authenticate Bearer header, or Depoto server's answer to an expired or unknown token.
+     */
+    protected function isAccessTokenRejected(ResponseInterface $response): bool
+    {
+        if($response->getStatusCode() != 401) {
+            return false;
+        }
+
+        $res = json_decode((string)$response->getBody(), true);
+        $error = is_array($res) ? ($res['error'] ?? null) : null;
+
+        if(!$error && preg_match('/^Bearer\b.*\berror="([^"]*)"/i', $response->getHeaderLine('WWW-Authenticate'), $matches)) {
+            $error = $matches[1];
+        }
+
+        if(in_array($error, ['invalid_token', 'invalid_grant'], true)) {
+            return true;
+        }
+
+        // Depoto server answers an expired or unknown token with a bare JSON {"message": "An authentication exception occurred."}.
+        // Only this exact message is matched, so a 401 with any other message is not retried.
+        return is_array($res) && ($res['message'] ?? null) === 'An authentication exception occurred.';
+    }
+
+    protected function createGraphqlRequest(string $url, string $body, ?string $accessToken): RequestInterface
+    {
+        return $this->requestFactory->createRequest('POST', $url)
+            ->withHeader('Content-Type', 'application/json; charset=utf-8')
+            ->withHeader('Accept', 'application/json')
+            ->withHeader('Accept-Encoding', '*')
+            ->withHeader('Authorization', 'Bearer ' . $accessToken)
+            ->withBody($this->streamFactory->createStream($body));
     }
 
     protected function buildBatchGraphqlDocument(string $type, array $operations): string
@@ -460,7 +524,8 @@ class Client
             return false;
         }
 
-        if($oauthData['access_token'] && $oauthData['expires_time'] > time()-100) {
+        // Consider token expired 100 s before its real expiration so it's refreshed in time
+        if($oauthData['access_token'] && $oauthData['expires_time'] - 100 > time()) {
             return true;
         }
 
