@@ -83,6 +83,11 @@ $depoto
     ->setMaxRateLimitWait(5); // nejdelší čekání v sekundách před jedním opakováním
 ```
 
+Jedno volání tak může blokovat až `getRateLimitRetries()` × `getMaxRateLimitWait()` sekund (výchozí 2 × 5 s = 10 s), a to u každého volání zvlášť.
+V synchronním kontextu (webhook nebo jiný HTTP controller, API proxy), kde volající čeká na odpověď, nastavte
+`setRateLimitRetries(0)` (výjimka hned), nebo `setMaxRateLimitWait(1)` (klient vyčká jen krátké odmítnutí kvůli souběžným požadavkům),
+a při `RateLimitException` práci odložte do fronty nebo vraťte chybu, místo aby požadavek visel.
+
 #### Co musí udělat aplikace (konektor)
 * `RateLimitException` **nikdy nepolykejte**. Handler zprávy, který výjimku jen zaloguje (`catch (\Exception $e) { $logger->error(...); }`), by zprávu zahodil – např. objednávka by se tiše nenaimportovala.
   Zprávu je nutné zpracovat znovu později, ideálně až za `getRetryAfter()` sekund.
@@ -110,6 +115,15 @@ catch (\Exception $e) {
   * `RecoverableMessageHandlingException` vynutí opakování bez ohledu na `max_retries` – zpráva se zkouší, dokud neprojde.
   * Pokud výjimku jen propustíte ven (`throw $e;`), opakuje se podle `retry_strategy` transportu. Při nastavení `max_retries: 3, multiplier: 2`
     a výchozí prodlevě 1 s jsou to pokusy po 1, 2 a 4 sekundách, což při `Retry-After` až 300 s nemusí stačit a zpráva pak skončí ve failure transportu (nebo se zahodí, pokud žádný není).
+  * Prodlevu (`$retryDelay` i `retry_strategy`) použijí jen transporty, které respektují `DelayStamp` (Doctrine, Redis, AMQP).
+    Google Pub/Sub (`gps://`, petitpress/gps-messenger-bundle) zprávu k opakování znovu neodesílá, jen ji odmítne a Pub/Sub ji doručí znovu
+    podle retry policy subscription – tu nastavte (`minimumBackoff`/`maximumBackoff`) tak, aby pokryla `Retry-After`.
+* Znovu se zpracuje **celá zpráva**, ne jen odmítnutý požadavek. Kroky handleru, které proběhly před výjimkou (např. založení adresy nebo zákazníka
+  před `createOrder`), proběhnou znovu. Handler opakovaný tímto způsobem musí být idempotentní – před založením ověřit, zda záznam už neexistuje,
+  a přeskočit hotové kroky. U handleru, který idempotentní není, raději zvolte omezený počet opakování (výjimku jen propustit
+  a `retry_strategy` nastavit na prodlevy v řádu `Retry-After`) než neomezené opakování přes `RecoverableMessageHandlingException`.
+* Na `RateLimitException` nereagujte náhradním pokusem s jinými daty (např. „zkusit znovu bez balíků“) – výjimku propusťte ven. Náhradní volání
+  by po uvolnění limitu prošlo a část původních dat by se tiše ztratila.
 * Mimo Messenger (cron, fronta úloh) nechte úlohu selhat a naplánujte ji znovu, neoznačujte ji jako hotovou.
 
 ### Ouery
