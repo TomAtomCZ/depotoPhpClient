@@ -97,7 +97,8 @@ a při `RateLimitException` práci odložte do fronty nebo vraťte chybu, místo
 
 #### Co musí udělat aplikace (konektor)
 * `RateLimitException` **nikdy nepolykejte**. Handler zprávy, který výjimku jen zaloguje (`catch (\Exception $e) { $logger->error(...); }`), by zprávu zahodil – např. objednávka by se tiše nenaimportovala.
-  Zprávu je nutné zpracovat znovu později, ideálně až za `getRetryAfter()` sekund.
+  Zprávu je nutné zpracovat znovu později, ideálně až za `getRetryAfter()` sekund, nejméně však za 1 s – `getRetryAfter()` může vrátit 0
+  (hlavička `Retry-After: 0` nebo datum v minulosti) a okamžité opakování by limit jen dál zatěžovalo. `null` (hlavička chybí) nahraďte výchozí prodlevou.
 * Symfony Messenger: výjimku z handleru propusťte ven, nejlépe zabalenou do `RecoverableMessageHandlingException` s prodlevou podle `getRetryAfter()`:
 
 ```php
@@ -108,8 +109,11 @@ try {
     $result = $depoto->mutation('createOrder', $arguments, ['data' => ['id'], 'errors']);
 }
 catch (RateLimitException $e) {
-    // Zprávu zpracovat znovu za Retry-After sekund. Messenger počítá prodlevu v milisekundách.
-    throw new RecoverableMessageHandlingException($e->getMessage(), 0, $e, ($e->getRetryAfter() ?? 60) * 1000);
+    // Zprávu zpracovat znovu za Retry-After sekund (bez hlavičky za 60 s), nejméně za 1 s – Retry-After 0 by znamenal okamžité opakování bez konce.
+    // Náhodný rozptyl 0–1000 ms, aby se workery odmítnuté ve stejnou chvíli nevrátily ve stejné sekundě.
+    // Messenger počítá prodlevu v milisekundách.
+    $retryDelay = max(1, $e->getRetryAfter() ?? 60) * 1000 + mt_rand(0, 1000);
+    throw new RecoverableMessageHandlingException($e->getMessage(), 0, $e, $retryDelay);
 }
 catch (\Exception $e) {
     $this->logger->error($e->getMessage());
@@ -127,11 +131,12 @@ catch (\Exception $e) {
     podle retry policy subscription – tu nastavte (`minimumBackoff`/`maximumBackoff`) tak, aby pokryla `Retry-After`.
 * Znovu se zpracuje **celá zpráva**, ne jen odmítnutý požadavek. Kroky handleru, které proběhly před výjimkou (např. založení adresy nebo zákazníka
   před `createOrder`), proběhnou znovu. Handler opakovaný tímto způsobem musí být idempotentní – před založením ověřit, zda záznam už neexistuje,
-  a přeskočit hotové kroky. U handleru, který idempotentní není, raději zvolte omezený počet opakování (výjimku jen propustit
+  a přeskočit hotové kroky. Idempotence je nutná i proto, že `RateLimitException` z jiné odpovědi 429 než od Depoto serveru (viz výše)
+  nezaručuje, že odmítnutý požadavek neproběhl. U handleru, který idempotentní není, raději zvolte omezený počet opakování (výjimku jen propustit
   a `retry_strategy` nastavit na prodlevy v řádu `Retry-After`) než neomezené opakování přes `RecoverableMessageHandlingException`.
 * Na `RateLimitException` nereagujte náhradním pokusem s jinými daty (např. „zkusit znovu bez balíků“) – výjimku propusťte ven. Náhradní volání
   by po uvolnění limitu prošlo a část původních dat by se tiše ztratila.
-* Mimo Messenger (cron, fronta úloh) nechte úlohu selhat a naplánujte ji znovu, neoznačujte ji jako hotovou.
+* Mimo Messenger (cron, fronta úloh) nechte úlohu selhat a naplánujte ji znovu (za `getRetryAfter()` sekund, nejméně za 1 s), neoznačujte ji jako hotovou.
 
 ### Ouery
 #### Detail produktu
