@@ -566,16 +566,18 @@ class Client
         }
 
         $body = http_build_query($vars);
+        // Credentials and tokens never reach the log
+        $loggedBody = $this->redactTokenRequestBody($vars);
         $url = $this->getEndpointUri('/oauth/v2/token');
         $this->lastRequest = $this->requestFactory->createRequest('POST', $url)
             ->withHeader('Accept-Encoding', '*')
             ->withHeader('Content-Type', 'application/x-www-form-urlencoded; charset=utf-8')
             ->withBody($this->streamFactory->createStream($body));
 
-        $this->logger->debug('OAuthRequest: '.$body, [$url]);
+        $this->logger->debug('OAuthRequest: '.$loggedBody, [$url]);
         $this->lastResponse = $this->httpClient->sendRequest($this->lastRequest);
         $responseBody = (string)$this->lastResponse->getBody();
-        $this->logger->debug('OAuthResponse: '.$responseBody, [$url]);
+        $this->logger->debug('OAuthResponse: '.$this->redactTokenResponseBody($responseBody), [$url]);
         $statusCode = $this->lastResponse->getStatusCode();
 
         if($statusCode >= 200 && $statusCode < 400) {
@@ -588,21 +590,56 @@ class Client
                 $this->authenticate('refresh_token');
             }
             else {
-                $this->logger->warning($statusCode.': '.$responseBody, [$url, $body]);
+                $this->logger->warning($statusCode.': '.$responseBody, [$url, $loggedBody]);
                 throw new AuthenticationException($this->lastRequest, $this->lastResponse, $statusCode);
             }
         }
         elseif($statusCode == 429) {
-            // Token request is not retried automatically. Its body (credentials) is left out of the log.
+            // Token request is not retried automatically
             $this->logger->warning($statusCode.': '.$responseBody, [$url]);
             throw new RateLimitException($this->lastRequest, $this->lastResponse, $statusCode);
         }
         else {
-            $this->logger->error($statusCode.': '.$responseBody, [$url, $body]);
+            $this->logger->error($statusCode.': '.$responseBody, [$url, $loggedBody]);
             throw new ServerException($this->lastRequest, $this->lastResponse, $statusCode);
         }
 
         return $this;
+    }
+
+    /**
+     * Token request body for the log: client_secret, password and refresh_token are replaced with ***.
+     */
+    protected function redactTokenRequestBody(array $vars): string
+    {
+        foreach(['client_secret', 'password', 'refresh_token'] as $key) {
+            if(array_key_exists($key, $vars)) {
+                $vars[$key] = '***';
+            }
+        }
+
+        return urldecode(http_build_query($vars));
+    }
+
+    /**
+     * Token response body for the log: issued access_token and refresh_token are replaced with ***.
+     */
+    protected function redactTokenResponseBody(string $responseBody): string
+    {
+        $res = json_decode($responseBody, true);
+        if(!is_array($res)) {
+            return $responseBody;
+        }
+
+        $redacted = false;
+        foreach(['access_token', 'refresh_token'] as $key) {
+            if(array_key_exists($key, $res)) {
+                $res[$key] = '***';
+                $redacted = true;
+            }
+        }
+
+        return $redacted ? json_encode($res) : $responseBody;
     }
 
     protected function setOAuthData(array $data): void

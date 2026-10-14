@@ -825,6 +825,63 @@ class ClientTest extends TestCase
         }
     }
 
+    public function tokenResponseProvider(): array
+    {
+        return [
+            'password grant, 200' => ['password', 200],
+            'password grant, 400' => ['password', 400],
+            'password grant, 500' => ['password', 500],
+            'refresh_token grant, 200' => ['refresh_token', 200],
+            'refresh_token grant, 400' => ['refresh_token', 400],
+            'refresh_token grant, 500' => ['refresh_token', 500],
+        ];
+    }
+
+    /**
+     * @dataProvider tokenResponseProvider
+     */
+    public function testTokenEndpointLogsContainNoCredentials(string $grantType, int $statusCode): void
+    {
+        $cache = new InMemoryCache();
+        $logger = new RecordingLogger();
+        $responseData = [
+            200 => ['access_token' => 'issued-access-token', 'refresh_token' => 'issued-refresh-token', 'expires_in' => 43200],
+            400 => ['error' => 'invalid_grant', 'error_description' => 'Invalid username and password combination'],
+            500 => ['message' => 'Internal server error'],
+        ];
+        $httpClient = new RecordingHttpClient([$this->createJsonResponse($statusCode, $responseData[$statusCode])]);
+        $client = $this->getBatchTestClient($httpClient, $cache, false, Client::class, $logger);
+        $client
+            ->setClientSecret('client-secret-value')
+            ->setPassword('password-value');
+        $cache->set('depoto-oauth-'.md5($client->getUsername()), [
+            'access_token' => 'old-access-token',
+            'refresh_token' => 'stored-refresh-token',
+            'expires_time' => time() - 10,
+        ]);
+
+        try {
+            $client->authenticate($grantType);
+            $this->assertSame(200, $statusCode);
+        }
+        catch(ServerException|AuthenticationException $e) {
+            $this->assertNotSame(200, $statusCode);
+        }
+
+        $this->assertCount(1, $httpClient->requests);
+        $requestBody = (string)$httpClient->requests[0]->getBody();
+        $this->assertStringContainsString('client_secret=client-secret-value', $requestBody);
+
+        $this->assertNotEmpty($logger->records);
+        $serializedLog = json_encode($logger->records);
+        foreach(['client-secret-value', 'password-value', 'stored-refresh-token', 'issued-access-token', 'issued-refresh-token'] as $secret) {
+            $this->assertStringNotContainsString($secret, $serializedLog);
+        }
+        $this->assertStringContainsString('client_secret=***', $serializedLog);
+        $this->assertStringContainsString('grant_type='.$grantType, $serializedLog);
+        $this->assertStringContainsString('example.test\/oauth\/v2\/token', $serializedLog);
+    }
+
     public function testGraphqlErrorIsNotRetried(): void
     {
         $httpClient = new RecordingHttpClient([
