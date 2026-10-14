@@ -8,8 +8,10 @@ use Psr\Http\Message\RequestInterface;
 use Psr\Http\Message\ResponseInterface;
 
 /**
- * HTTP 429 Too Many Requests. The request was not processed and can be sent again later,
- * ideally after getRetryAfter() seconds.
+ * HTTP 429 Too Many Requests. When it is Depoto server's admission rejection (errors[].code RATE_LIMITED),
+ * the request was not processed. A 429 from anything in front of the server (proxy, load balancer) gives
+ * no such guarantee, the request may have been processed. Send the request again later, ideally after
+ * getRetryAfter() seconds, and keep the caller idempotent.
  */
 class RateLimitException extends ServerException
 {
