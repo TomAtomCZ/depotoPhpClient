@@ -5,6 +5,7 @@ namespace Depoto;
 use DateTime;
 use Depoto\Exception\AuthenticationException;
 use Depoto\Exception\ErrorException;
+use Depoto\Exception\RateLimitException;
 use Depoto\Exception\ServerException;
 use Depoto\GraphQL\MutationBuilder;
 use Depoto\GraphQL\QueryBuilder;
@@ -32,6 +33,8 @@ class Client
     protected LoggerInterface $logger;
     protected RequestInterface $lastRequest;
     protected ResponseInterface $lastResponse;
+    protected int $rateLimitRetries = 2;
+    protected int $maxRateLimitWait = 5;
 
     public function __construct(ClientInterface $httpClient,
                                 RequestFactoryInterface $requestFactory,
@@ -102,6 +105,39 @@ class Client
     }
 
     /**
+     * How many times one call()/batchCall() resends a GraphQL request that Depoto server rejected with 429 Too Many Requests
+     * at admission (see sendRateLimitedGraphqlRequest()). 0 disables automatic retry, the 429 is then thrown as RateLimitException at once.
+     * Retries also need setMaxRateLimitWait() of at least 1: the shortest wait before a retry is 1 s, so 0 means no automatic retry either.
+     */
+    public function setRateLimitRetries(int $rateLimitRetries): self
+    {
+        $this->rateLimitRetries = max(0, $rateLimitRetries);
+        return $this;
+    }
+
+    public function getRateLimitRetries(): int
+    {
+        return $this->rateLimitRetries;
+    }
+
+    /**
+     * Longest Retry-After in seconds the client waits for before a retry. A 429 asking for a longer wait
+     * is thrown as RateLimitException at once, so the caller can postpone the work instead of blocking.
+     * A random jitter of up to 1 s (getRateLimitJitter()) is added to the wait and not counted against this limit.
+     * 0 means never wait, i.e. no automatic retry: the shortest wait is 1 s (a missing or zero Retry-After counts as 1 s).
+     */
+    public function setMaxRateLimitWait(int $maxRateLimitWait): self
+    {
+        $this->maxRateLimitWait = max(0, $maxRateLimitWait);
+        return $this;
+    }
+
+    public function getMaxRateLimitWait(): int
+    {
+        return $this->maxRateLimitWait;
+    }
+
+    /**
      * Always read from cache, so the token sent is the same one isAuthenticated() checks,
      * including a token renewed by another client sharing the cache.
      */
@@ -134,6 +170,7 @@ class Client
      * @throws ClientExceptionInterface
      * @throws ErrorException
      * @throws AuthenticationException
+     * @throws RateLimitException
      * @throws ServerException
      */
     public function call(string $type, string $method, array $arguments, array $body): array
@@ -178,20 +215,15 @@ class Client
                 return $res;
             }
         }
-        elseif($statusCode >= 400 && $statusCode <= 403) {
-            $this->logger->warning($statusCode.': '.$responseBody, [$url, $body]);
-            throw new AuthenticationException($this->lastRequest, $this->lastResponse, $statusCode);
-        }
-        else {
-            $this->logger->error($statusCode.': '.$responseBody, [$url, $body]);
-            throw new ServerException($this->lastRequest, $this->lastResponse, $statusCode);
-        }
+
+        throw $this->createGraphqlStatusException($statusCode, $responseBody, $url, $body);
     }
 
     /**
      * @throws ClientExceptionInterface
      * @throws ErrorException
      * @throws AuthenticationException
+     * @throws RateLimitException
      * @throws ServerException
      */
     public function batchCall(string $type, array $operations, bool $throwOnOperationErrors = false): array
@@ -230,13 +262,29 @@ class Client
 
             return $data;
         }
-        elseif($statusCode >= 400 && $statusCode <= 403) {
+
+        throw $this->createGraphqlStatusException($statusCode, $responseBody, $url, $body);
+    }
+
+    /**
+     * Logs a GraphQL response with status outside 200-399 and returns the exception for it, shared by call() and batchCall():
+     * 400-403 AuthenticationException, 429 RateLimitException (both logged as warning), other ServerException (logged as error).
+     *
+     * @return AuthenticationException|RateLimitException|ServerException
+     */
+    protected function createGraphqlStatusException(int $statusCode, string $responseBody, string $url, string $body): \Depoto\Exception\Exception
+    {
+        if($statusCode >= 400 && $statusCode <= 403) {
             $this->logger->warning($statusCode.': '.$responseBody, [$url, $body]);
-            throw new AuthenticationException($this->lastRequest, $this->lastResponse, $statusCode);
+            return new AuthenticationException($this->lastRequest, $this->lastResponse, $statusCode);
+        }
+        elseif($statusCode == 429) {
+            $this->logger->warning($statusCode.': '.$responseBody, [$url, $body]);
+            return new RateLimitException($this->lastRequest, $this->lastResponse, $statusCode);
         }
         else {
             $this->logger->error($statusCode.': '.$responseBody, [$url, $body]);
-            throw new ServerException($this->lastRequest, $this->lastResponse, $statusCode);
+            return new ServerException($this->lastRequest, $this->lastResponse, $statusCode);
         }
     }
 
@@ -245,14 +293,16 @@ class Client
      * (e.g. it expired or server clocks differ), a new token is obtained and the request is retried once.
      * The request is safe to retry then, because it was refused before being processed.
      * Other 401 responses are returned as they are.
+     * Both sends resend Depoto server's 429 admission rejection, at most getRateLimitRetries() times in total,
+     * see sendRateLimitedGraphqlRequest().
      *
      * @throws ClientExceptionInterface
+     * @throws RateLimitException when the token endpoint answers re-authentication with 429
      */
     protected function sendGraphqlRequest(string $url, string $body): ResponseInterface
     {
-        $accessToken = $this->getAccessToken();
-        $this->lastRequest = $this->createGraphqlRequest($url, $body, $accessToken);
-        $this->lastResponse = $this->httpClient->sendRequest($this->lastRequest);
+        $rateLimitRetriesLeft = $this->rateLimitRetries;
+        $accessToken = $this->sendRateLimitedGraphqlRequest($url, $body, $rateLimitRetriesLeft);
 
         if(!$this->isAccessTokenRejected($this->lastResponse)) {
             return $this->lastResponse;
@@ -268,6 +318,11 @@ class Client
                 $this->authenticate();
             }
             catch(AuthenticationException|ServerException $e) {
+                if($e instanceof RateLimitException) {
+                    // A temporary refusal, not a failed authentication: the caller can send the request again later
+                    throw $e;
+                }
+
                 // Caller reports the rejected GraphQL request, not the failed token request
                 $this->lastRequest = $rejectedRequest;
                 $this->lastResponse = $rejectedResponse;
@@ -278,10 +333,125 @@ class Client
             $this->logger->info('401: access token rejected, retrying request with token renewed in cache', [$url]);
         }
 
-        $this->lastRequest = $this->createGraphqlRequest($url, $body, $this->getAccessToken());
-        $this->lastResponse = $this->httpClient->sendRequest($this->lastRequest);
+        $this->sendRateLimitedGraphqlRequest($url, $body, $rateLimitRetriesLeft);
 
         return $this->lastResponse;
+    }
+
+    /**
+     * Sends GraphQL request and, while it is answered with 429 Too Many Requests and $retriesLeft allows,
+     * waits for Retry-After seconds plus a random jitter (getRateLimitJitter()) and sends it again. A 429 asking for a longer wait
+     * than getMaxRateLimitWait() is not retried. Each retry rebuilds the request with the access token currently in cache.
+     *
+     * Only Depoto server's admission rejection is resent, see isRateLimitAdmissionRejection(). Resending it is safe,
+     * mutations included: Depoto server applies its rate limits at admission, before the request is executed,
+     * so a request it answered with 429 was not processed at all. Any other 429 (a proxy or load balancer in front
+     * of the server, an unknown body) gives no such guarantee, so it is not resent and the caller gets RateLimitException.
+     *
+     * Returns the access token sent in the last request, stores the request and response in lastRequest and lastResponse.
+     *
+     * @throws ClientExceptionInterface
+     */
+    protected function sendRateLimitedGraphqlRequest(string $url, string $body, int &$retriesLeft): ?string
+    {
+        while(true) {
+            $accessToken = $this->getAccessToken();
+            $this->lastRequest = $this->createGraphqlRequest($url, $body, $accessToken);
+            $this->lastResponse = $this->httpClient->sendRequest($this->lastRequest);
+
+            if($this->lastResponse->getStatusCode() != 429 || $retriesLeft <= 0) {
+                return $accessToken;
+            }
+
+            if(!$this->isRateLimitAdmissionRejection($this->lastResponse)) {
+                $this->logger->info('429: rate limited, response is not Depoto server admission rejection, not retrying request',
+                    ['status' => 429, 'url' => $url]);
+                return $accessToken;
+            }
+
+            $wait = RateLimitException::parseRetryAfter($this->lastResponse);
+            if(!$wait) {
+                $wait = 1;
+            }
+
+            if($wait > $this->maxRateLimitWait) {
+                $this->logger->info('429: rate limited, Retry-After exceeds maximum wait, not retrying request',
+                    ['status' => 429, 'wait' => $wait, 'maxWait' => $this->maxRateLimitWait, 'url' => $url]);
+                return $accessToken;
+            }
+
+            $retriesLeft--;
+            $attempt = $this->rateLimitRetries - $retriesLeft;
+            $jitter = $this->getRateLimitJitter();
+            $this->logger->info('429: rate limited, retrying request after Retry-After',
+                ['status' => 429, 'wait' => $wait, 'jitter' => $jitter, 'attempt' => $attempt, 'url' => $url]);
+            $this->pause($wait * 1000 + $jitter);
+        }
+    }
+
+    /**
+     * Depoto server's rejection at admission, before any resolver runs: 429 with JSON body
+     * {"errors": [{"message": "...", "code": "RATE_LIMITED"}]}. Only such a response is known to be safe to resend.
+     */
+    protected function isRateLimitAdmissionRejection(ResponseInterface $response): bool
+    {
+        if($response->getStatusCode() != 429) {
+            return false;
+        }
+
+        $res = json_decode((string)$response->getBody(), true);
+        $errors = is_array($res) ? ($res['errors'] ?? null) : null;
+        if(!is_array($errors)) {
+            return false;
+        }
+
+        foreach($errors as $error) {
+            if(is_array($error) && ($error['code'] ?? null) === 'RATE_LIMITED') {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    /**
+     * Random milliseconds (0 to 1000) added to the Retry-After wait, so that workers refused at the same moment
+     * do not all send their requests again in the same second. Tests override it to get a fixed value.
+     */
+    protected function getRateLimitJitter(): int
+    {
+        return mt_rand(0, 1000);
+    }
+
+    /**
+     * Waits the given milliseconds before a rate limited request is sent again. Tests override it to avoid sleeping.
+     * A signal can end usleep() early, so the wait continues until the deadline is reached.
+     * The deadline is measured on the monotonic clock, so a change of the system time does not shorten or extend it.
+     */
+    protected function pause(int $milliseconds): void
+    {
+        $deadline = $this->getMonotonicNanoseconds() + $milliseconds * 1000000;
+
+        while(($remaining = $deadline - $this->getMonotonicNanoseconds()) > 0) {
+            // Steps of at most 0.5 s, usleep() of 1 s or more is not portable
+            $this->sleepMicroseconds((int)min(ceil($remaining / 1000), 500000));
+        }
+    }
+
+    /**
+     * Current value of the monotonic clock in nanoseconds, used by pause(). Tests override it with a fake clock.
+     */
+    protected function getMonotonicNanoseconds(): int
+    {
+        return hrtime(true);
+    }
+
+    /**
+     * Sleeps at most the given microseconds; a signal can end the sleep early. Used by pause(), tests override it.
+     */
+    protected function sleepMicroseconds(int $microseconds): void
+    {
+        usleep($microseconds);
     }
 
     /**
@@ -447,6 +617,7 @@ class Client
     /**
      * @throws ClientExceptionInterface
      * @throws AuthenticationException
+     * @throws RateLimitException
      * @throws ServerException
      * @throws Exception
      */
@@ -467,16 +638,18 @@ class Client
         }
 
         $body = http_build_query($vars);
+        // Credentials and tokens never reach the log
+        $loggedBody = $this->redactTokenRequestBody($vars);
         $url = $this->getEndpointUri('/oauth/v2/token');
         $this->lastRequest = $this->requestFactory->createRequest('POST', $url)
             ->withHeader('Accept-Encoding', '*')
             ->withHeader('Content-Type', 'application/x-www-form-urlencoded; charset=utf-8')
             ->withBody($this->streamFactory->createStream($body));
 
-        $this->logger->debug('OAuthRequest: '.$body, [$url]);
+        $this->logger->debug('OAuthRequest: '.$loggedBody, [$url]);
         $this->lastResponse = $this->httpClient->sendRequest($this->lastRequest);
         $responseBody = (string)$this->lastResponse->getBody();
-        $this->logger->debug('OAuthResponse: '.$responseBody, [$url]);
+        $this->logger->debug('OAuthResponse: '.$this->redactTokenResponseBody($responseBody), [$url]);
         $statusCode = $this->lastResponse->getStatusCode();
 
         if($statusCode >= 200 && $statusCode < 400) {
@@ -489,16 +662,56 @@ class Client
                 $this->authenticate('refresh_token');
             }
             else {
-                $this->logger->warning($statusCode.': '.$responseBody, [$url, $body]);
+                $this->logger->warning($statusCode.': '.$responseBody, [$url, $loggedBody]);
                 throw new AuthenticationException($this->lastRequest, $this->lastResponse, $statusCode);
             }
         }
+        elseif($statusCode == 429) {
+            // Token request is not retried automatically
+            $this->logger->warning($statusCode.': '.$responseBody, [$url]);
+            throw new RateLimitException($this->lastRequest, $this->lastResponse, $statusCode);
+        }
         else {
-            $this->logger->error($statusCode.': '.$responseBody, [$url, $body]);
+            $this->logger->error($statusCode.': '.$responseBody, [$url, $loggedBody]);
             throw new ServerException($this->lastRequest, $this->lastResponse, $statusCode);
         }
 
         return $this;
+    }
+
+    /**
+     * Token request body for the log: client_secret, password and refresh_token are replaced with ***.
+     */
+    protected function redactTokenRequestBody(array $vars): string
+    {
+        foreach(['client_secret', 'password', 'refresh_token'] as $key) {
+            if(array_key_exists($key, $vars)) {
+                $vars[$key] = '***';
+            }
+        }
+
+        return urldecode(http_build_query($vars));
+    }
+
+    /**
+     * Token response body for the log: issued access_token and refresh_token are replaced with ***.
+     */
+    protected function redactTokenResponseBody(string $responseBody): string
+    {
+        $res = json_decode($responseBody, true);
+        if(!is_array($res)) {
+            return $responseBody;
+        }
+
+        $redacted = false;
+        foreach(['access_token', 'refresh_token'] as $key) {
+            if(array_key_exists($key, $res)) {
+                $res[$key] = '***';
+                $redacted = true;
+            }
+        }
+
+        return $redacted ? json_encode($res) : $responseBody;
     }
 
     protected function setOAuthData(array $data): void

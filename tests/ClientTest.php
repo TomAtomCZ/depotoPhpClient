@@ -3,6 +3,8 @@
 use Depoto\Client;
 use Depoto\Exception\AuthenticationException;
 use Depoto\Exception\ErrorException;
+use Depoto\Exception\RateLimitException;
+use Depoto\Exception\ServerException;
 use Monolog\Handler\StreamHandler;
 use Monolog\Logger;
 use Nyholm\Psr7\Factory\Psr17Factory;
@@ -10,6 +12,8 @@ use PHPUnit\Framework\TestCase;
 use Psr\Http\Client\ClientInterface;
 use Psr\Http\Message\RequestInterface;
 use Psr\Http\Message\ResponseInterface;
+use Psr\Log\AbstractLogger;
+use Psr\Log\LoggerInterface;
 use Psr\Log\NullLogger;
 use Psr\SimpleCache\CacheInterface;
 use Symfony\Component\Cache\Adapter\ApcuAdapter;
@@ -34,18 +38,21 @@ class ClientTest extends TestCase
         return $depotoClient;
     }
 
-    private function getBatchTestClient(RecordingHttpClient $httpClient, InMemoryCache $cache): Client
+    private function getBatchTestClient(RecordingHttpClient $httpClient, InMemoryCache $cache, bool $authenticated = true,
+                                        string $clientClass = Client::class, ?LoggerInterface $logger = null): Client
     {
         $psr17Factory = new Psr17Factory();
         $username = 'unit@example.com';
 
-        $cache->set('depoto-oauth-'.md5($username), [
-            'access_token' => 'test-token',
-            'refresh_token' => 'test-refresh-token',
-            'expires_time' => time() + 3600,
-        ]);
+        if($authenticated) {
+            $cache->set('depoto-oauth-'.md5($username), [
+                'access_token' => 'test-token',
+                'refresh_token' => 'test-refresh-token',
+                'expires_time' => time() + 3600,
+            ]);
+        }
 
-        $depotoClient = new Client($httpClient, $psr17Factory, $psr17Factory, $cache, new NullLogger());
+        $depotoClient = new $clientClass($httpClient, $psr17Factory, $psr17Factory, $cache, $logger ?? new NullLogger());
         $depotoClient
             ->setBaseUrl('https://example.test')
             ->setUsername($username)
@@ -392,6 +399,841 @@ class ClientTest extends TestCase
                 'body' => ['data' => ['id', 'name']],
             ],
         ], true);
+    }
+
+    private function getRateLimitTestClient(RecordingHttpClient $httpClient, ?InMemoryCache $cache = null, bool $authenticated = true,
+                                            ?LoggerInterface $logger = null): PauseRecordingClient
+    {
+        /** @var PauseRecordingClient $client */
+        $client = $this->getBatchTestClient($httpClient, $cache ?? new InMemoryCache(), $authenticated, PauseRecordingClient::class, $logger);
+
+        return $client;
+    }
+
+    private function createRateLimitResponse(?string $retryAfter, string $message = 'Too many concurrent requests.'): ResponseInterface
+    {
+        $response = $this->createJsonResponse(429, ['errors' => [['message' => $message, 'code' => 'RATE_LIMITED']]]);
+
+        return $retryAfter === null ? $response : $response->withHeader('Retry-After', $retryAfter);
+    }
+
+    private function createProductsResponse(): ResponseInterface
+    {
+        return $this->createJsonResponse(200, ['data' => ['products' => ['items' => [['id' => '1']]]]]);
+    }
+
+    public function testRateLimitConfigurationDefaultsAndSetters(): void
+    {
+        $client = $this->getBatchTestClient(new RecordingHttpClient([]), new InMemoryCache());
+
+        $this->assertSame(2, $client->getRateLimitRetries());
+        $this->assertSame(5, $client->getMaxRateLimitWait());
+
+        $this->assertSame($client, $client->setRateLimitRetries(4)->setMaxRateLimitWait(30));
+        $this->assertSame(4, $client->getRateLimitRetries());
+        $this->assertSame(30, $client->getMaxRateLimitWait());
+
+        $client->setRateLimitRetries(-3);
+        $this->assertSame(0, $client->getRateLimitRetries());
+    }
+
+    public function testRateLimitedQueryIsRetriedAfterRetryAfter(): void
+    {
+        $logger = new RecordingLogger();
+        $httpClient = new RecordingHttpClient([
+            $this->createRateLimitResponse('3'),
+            $this->createProductsResponse(),
+        ]);
+        $client = $this->getRateLimitTestClient($httpClient, null, true, $logger);
+
+        $result = $client->query('products', ['filters' => ['fulltext' => 'secret search']], ['items' => ['id']]);
+
+        $this->assertSame([['id' => '1']], $result['items']);
+        $this->assertSame([3000], $client->pauses);
+        $this->assertCount(2, $httpClient->requests);
+        $this->assertSame('Bearer test-token', $httpClient->requests[0]->getHeaderLine('Authorization'));
+        $this->assertSame('Bearer test-token', $httpClient->requests[1]->getHeaderLine('Authorization'));
+        $this->assertNotSame('', (string)$httpClient->requests[1]->getBody());
+        $this->assertSame((string)$httpClient->requests[0]->getBody(), (string)$httpClient->requests[1]->getBody());
+
+        $retryLogs = $logger->recordsWithLevel('info');
+        $this->assertCount(1, $retryLogs);
+        $this->assertSame(429, $retryLogs[0]['context']['status']);
+        $this->assertSame(3, $retryLogs[0]['context']['wait']);
+        $this->assertSame(1, $retryLogs[0]['context']['attempt']);
+        $this->assertSame('https://example.test/graphql', $retryLogs[0]['context']['url']);
+        $serializedLog = json_encode($retryLogs);
+        $this->assertStringNotContainsString('secret', $serializedLog);
+        $this->assertStringNotContainsString('test-token', $serializedLog);
+    }
+
+    public function testRateLimitRetriesExhaustedThrowsRateLimitException(): void
+    {
+        $logger = new RecordingLogger();
+        $httpClient = new RecordingHttpClient([
+            $this->createRateLimitResponse('1'),
+            $this->createRateLimitResponse('1'),
+            $this->createRateLimitResponse('1'),
+        ]);
+        $client = $this->getRateLimitTestClient($httpClient, null, true, $logger);
+
+        try {
+            $client->query('products', [], ['items' => ['id']]);
+            $this->fail('RateLimitException was not thrown.');
+        }
+        catch(RateLimitException $e) {
+            $this->assertInstanceOf(ServerException::class, $e);
+            $this->assertSame(429, $e->getCode());
+            $this->assertSame(1, $e->getRetryAfter());
+            $this->assertSame(429, $e->getResponse()->getStatusCode());
+            $this->assertSame('https://example.test/graphql', (string)$e->getRequest()->getUri());
+            $this->assertStringContainsString('Too many concurrent requests.', $e->getMessage());
+            $this->assertSame([1000, 1000], $client->pauses);
+            $this->assertCount(3, $httpClient->requests);
+            $this->assertCount(1, $logger->recordsWithLevel('warning'));
+            $this->assertCount(0, $logger->recordsWithLevel('error'));
+        }
+    }
+
+    public function testRetryAfterAboveMaxWaitThrowsImmediately(): void
+    {
+        $httpClient = new RecordingHttpClient([
+            $this->createRateLimitResponse('120', 'API time budget exceeded.'),
+        ]);
+        $client = $this->getRateLimitTestClient($httpClient);
+
+        try {
+            $client->query('products', [], ['items' => ['id']]);
+            $this->fail('RateLimitException was not thrown.');
+        }
+        catch(RateLimitException $e) {
+            $this->assertSame(120, $e->getRetryAfter());
+            $this->assertStringContainsString('API time budget exceeded.', $e->getMessage());
+            $this->assertSame([], $client->pauses);
+            $this->assertCount(1, $httpClient->requests);
+        }
+    }
+
+    public function testRetryAfterUpToRaisedMaxWaitIsWaited(): void
+    {
+        $httpClient = new RecordingHttpClient([
+            $this->createRateLimitResponse('120'),
+            $this->createProductsResponse(),
+        ]);
+        $client = $this->getRateLimitTestClient($httpClient);
+        $client->setMaxRateLimitWait(120);
+
+        $client->query('products', [], ['items' => ['id']]);
+
+        $this->assertSame([120000], $client->pauses);
+        $this->assertCount(2, $httpClient->requests);
+    }
+
+    public function testJitterIsAddedToRetryAfter(): void
+    {
+        $logger = new RecordingLogger();
+        $httpClient = new RecordingHttpClient([
+            $this->createRateLimitResponse('3'),
+            $this->createRateLimitResponse(null),
+            $this->createProductsResponse(),
+        ]);
+        $client = $this->getRateLimitTestClient($httpClient, null, true, $logger);
+        $client->jitter = 250;
+
+        $client->query('products', [], ['items' => ['id']]);
+
+        $this->assertSame([3250, 1250], $client->pauses);
+        $retryLogs = $logger->recordsWithLevel('info');
+        $this->assertCount(2, $retryLogs);
+        $this->assertSame(3, $retryLogs[0]['context']['wait']);
+        $this->assertSame(250, $retryLogs[0]['context']['jitter']);
+    }
+
+    public function testMaxWaitIsComparedWithRetryAfterWithoutJitter(): void
+    {
+        $httpClient = new RecordingHttpClient([
+            $this->createRateLimitResponse('5'),
+            $this->createProductsResponse(),
+        ]);
+        $client = $this->getRateLimitTestClient($httpClient);
+        $client->jitter = 1000;
+
+        $client->query('products', [], ['items' => ['id']]);
+
+        $this->assertSame(5, $client->getMaxRateLimitWait());
+        $this->assertSame([6000], $client->pauses);
+        $this->assertCount(2, $httpClient->requests);
+    }
+
+    public function testDefaultJitterIsUpToOneSecond(): void
+    {
+        $client = $this->getBatchTestClient(new RecordingHttpClient([]), new InMemoryCache(), true, WaitExposingClient::class);
+
+        $jitters = [];
+        for($i = 0; $i < 200; $i++) {
+            $jitter = $client->callGetRateLimitJitter();
+            $this->assertGreaterThanOrEqual(0, $jitter);
+            $this->assertLessThanOrEqual(1000, $jitter);
+            $jitters[$jitter] = true;
+        }
+
+        // 200 draws from 1001 values: all equal only with negligible probability
+        $this->assertGreaterThan(1, count($jitters));
+    }
+
+    public function testZeroMaxWaitDisablesRetry(): void
+    {
+        $httpClient = new RecordingHttpClient([
+            $this->createRateLimitResponse('1'),
+        ]);
+        $client = $this->getRateLimitTestClient($httpClient);
+        $client->setMaxRateLimitWait(0);
+
+        try {
+            $client->query('products', [], ['items' => ['id']]);
+            $this->fail('RateLimitException was not thrown.');
+        }
+        catch(RateLimitException $e) {
+            $this->assertSame(0, $client->getMaxRateLimitWait());
+            $this->assertSame([], $client->pauses);
+            $this->assertCount(1, $httpClient->requests);
+        }
+    }
+
+    public function testPauseWaitsGivenMilliseconds(): void
+    {
+        $client = $this->getBatchTestClient(new RecordingHttpClient([]), new InMemoryCache(), true, WaitExposingClient::class);
+
+        $start = microtime(true);
+        $client->callPause(150);
+        $elapsed = microtime(true) - $start;
+
+        $this->assertGreaterThanOrEqual(0.15, $elapsed);
+        $this->assertLessThan(1.15, $elapsed);
+
+        $start = microtime(true);
+        $client->callPause(0);
+        $this->assertLessThan(0.1, microtime(true) - $start);
+    }
+
+    public function testPauseSleepsAgainUntilDeadlineWhenSleepEndsEarly(): void
+    {
+        foreach([1, 7, 499, 500, 501, 1000, 1500, 120000, 301000] as $milliseconds) {
+            $client = $this->getBatchTestClient(new RecordingHttpClient([]), new InMemoryCache(), true, FakeClockClient::class);
+            $start = $client->now;
+
+            $client->callPause($milliseconds);
+
+            $elapsed = $client->now - $start;
+            $this->assertGreaterThanOrEqual($milliseconds * 1000000, $elapsed, $milliseconds.' ms');
+            // A sleep cut short is followed by another one, but the wait does not overshoot the deadline
+            $this->assertLessThan($milliseconds * 1000000 + 1000000, $elapsed, $milliseconds.' ms');
+            $this->assertGreaterThan(1, count($client->sleeps), $milliseconds.' ms');
+            foreach($client->sleeps as $microseconds) {
+                $this->assertGreaterThan(0, $microseconds);
+                $this->assertLessThanOrEqual(500000, $microseconds);
+            }
+        }
+
+        foreach([0, -1, -1000] as $milliseconds) {
+            $client = $this->getBatchTestClient(new RecordingHttpClient([]), new InMemoryCache(), true, FakeClockClient::class);
+            $client->callPause($milliseconds);
+            $this->assertSame([], $client->sleeps, $milliseconds.' ms');
+        }
+    }
+
+    public function testPauseWaitsUntilDeadlineWhenInterruptedBySignal(): void
+    {
+        if(!function_exists('pcntl_signal') || !function_exists('pcntl_async_signals') || !function_exists('pcntl_alarm')) {
+            $this->markTestSkipped('ext-pcntl is required to interrupt the wait by a signal.');
+        }
+
+        $client = $this->getBatchTestClient(new RecordingHttpClient([]), new InMemoryCache(), true, WaitExposingClient::class);
+        $signals = 0;
+        $asyncSignals = pcntl_async_signals(true);
+        pcntl_signal(SIGALRM, function() use (&$signals) {
+            $signals++;
+        });
+
+        try {
+            pcntl_alarm(1);
+            $start = microtime(true);
+            $client->callPause(1500);
+            $elapsed = microtime(true) - $start;
+        }
+        finally {
+            pcntl_alarm(0);
+            pcntl_signal(SIGALRM, SIG_DFL);
+            pcntl_async_signals($asyncSignals);
+        }
+
+        $this->assertSame(1, $signals);
+        $this->assertGreaterThanOrEqual(1.5, $elapsed);
+    }
+
+    public function testRateLimitRetriesCanBeDisabled(): void
+    {
+        $httpClient = new RecordingHttpClient([
+            $this->createRateLimitResponse('1'),
+        ]);
+        $client = $this->getRateLimitTestClient($httpClient);
+        $client->setRateLimitRetries(0);
+
+        try {
+            $client->query('products', [], ['items' => ['id']]);
+            $this->fail('RateLimitException was not thrown.');
+        }
+        catch(RateLimitException $e) {
+            $this->assertSame(1, $e->getRetryAfter());
+            $this->assertSame([], $client->pauses);
+            $this->assertCount(1, $httpClient->requests);
+        }
+    }
+
+    public function testMissingRetryAfterWaitsOneSecond(): void
+    {
+        $httpClient = new RecordingHttpClient([
+            $this->createRateLimitResponse(null),
+            $this->createRateLimitResponse('0'),
+            $this->createRateLimitResponse('soon'),
+        ]);
+        $client = $this->getRateLimitTestClient($httpClient);
+
+        try {
+            $client->query('products', [], ['items' => ['id']]);
+            $this->fail('RateLimitException was not thrown.');
+        }
+        catch(RateLimitException $e) {
+            $this->assertNull($e->getRetryAfter());
+            $this->assertSame([1000, 1000], $client->pauses);
+            $this->assertCount(3, $httpClient->requests);
+        }
+    }
+
+    public function testHttpDateRetryAfterIsWaitedUntilThatDate(): void
+    {
+        $httpClient = new RecordingHttpClient([
+            $this->createRateLimitResponse(gmdate('D, d M Y H:i:s \G\M\T', time() + 3)),
+            $this->createProductsResponse(),
+        ]);
+        $client = $this->getRateLimitTestClient($httpClient);
+
+        $client->query('products', [], ['items' => ['id']]);
+
+        $this->assertCount(1, $client->pauses);
+        // The second may tick between creating the header and parsing it
+        $this->assertGreaterThanOrEqual(2000, $client->pauses[0]);
+        $this->assertLessThanOrEqual(3000, $client->pauses[0]);
+        $this->assertCount(2, $httpClient->requests);
+    }
+
+    public function testRetryAfterHeaderParsing(): void
+    {
+        $now = gmmktime(7, 28, 0, 10, 21, 2015); // Wed, 21 Oct 2015 07:28:00 GMT
+        $psr17Factory = new Psr17Factory();
+        $parse = function(?string $retryAfter) use ($psr17Factory, $now): ?int {
+            $response = $psr17Factory->createResponse(429);
+            if($retryAfter !== null) {
+                $response = $response->withHeader('Retry-After', $retryAfter);
+            }
+            return RateLimitException::parseRetryAfter($response, $now);
+        };
+
+        $this->assertSame(0, $parse('0'));
+        $this->assertSame(120, $parse('120'));
+        $this->assertSame(7, $parse(' 7 '));
+        $this->assertSame(90, $parse('Wed, 21 Oct 2015 07:29:30 GMT'));
+        $this->assertSame(90, $parse('Wednesday, 21-Oct-15 07:29:30 GMT'));
+        $this->assertSame(90, $parse('Wed Oct 21 07:29:30 2015'));
+        $this->assertSame(0, $parse('Wed, 21 Oct 2015 07:00:00 GMT'));
+        $this->assertSame(11 * 86400, $parse('Sun Nov  1 07:28:00 2015')); // asctime pads a 1-digit day with a space
+        $this->assertSame(2147483647, $parse('99999999999999999999'));
+        $this->assertNull($parse('Mon, 21 Oct 2015 07:29:30 GMT')); // weekday does not match the date
+        $this->assertNull($parse('Monday, 21-Oct-15 07:29:30 GMT'));
+        $this->assertNull($parse('Mon Oct 21 07:29:30 2015'));
+        $this->assertNull($parse(null));
+        $this->assertNull($parse(''));
+        $this->assertNull($parse('-5'));
+        $this->assertNull($parse('1.5'));
+        $this->assertNull($parse('soon'));
+        $this->assertNull($parse('tomorrow'));
+        $this->assertNull($parse('Wed, 32 Oct 2015 07:29:30 GMT'));
+    }
+
+    public function testRateLimitedMutationIsRetried(): void
+    {
+        $httpClient = new RecordingHttpClient([
+            $this->createRateLimitResponse('1'),
+            $this->createJsonResponse(200, ['data' => ['createProduct' => ['data' => ['id' => '5']]]]),
+        ]);
+        $client = $this->getRateLimitTestClient($httpClient);
+
+        $result = $client->mutation('createProduct', ['name' => 'Product'], ['data' => ['id']]);
+
+        $this->assertSame('5', $result['data']['id']);
+        $this->assertSame([1000], $client->pauses);
+        $this->assertCount(2, $httpClient->requests);
+        $this->assertStringContainsString('mutation', (string)$httpClient->requests[1]->getBody());
+        $this->assertSame((string)$httpClient->requests[0]->getBody(), (string)$httpClient->requests[1]->getBody());
+    }
+
+    public function testRateLimitedBatchCallIsRetried(): void
+    {
+        $httpClient = new RecordingHttpClient([
+            $this->createRateLimitResponse('2'),
+            $this->createJsonResponse(200, ['data' => ['first' => ['data' => ['id' => '5']]]]),
+        ]);
+        $client = $this->getRateLimitTestClient($httpClient);
+
+        $result = $client->batchMutation([
+            'first' => ['method' => 'createProduct', 'arguments' => ['name' => 'Product'], 'body' => ['data' => ['id']]],
+        ]);
+
+        $this->assertSame('5', $result['first']['data']['id']);
+        $this->assertSame([2000], $client->pauses);
+        $this->assertCount(2, $httpClient->requests);
+        $this->assertSame((string)$httpClient->requests[0]->getBody(), (string)$httpClient->requests[1]->getBody());
+    }
+
+    public function testRateLimitedBatchCallThrowsRateLimitException(): void
+    {
+        $httpClient = new RecordingHttpClient([
+            $this->createRateLimitResponse('60'),
+        ]);
+        $client = $this->getRateLimitTestClient($httpClient);
+
+        try {
+            $client->batchQuery(['productList' => ['method' => 'products', 'body' => ['items' => ['id']]]]);
+            $this->fail('RateLimitException was not thrown.');
+        }
+        catch(RateLimitException $e) {
+            $this->assertSame(60, $e->getRetryAfter());
+            $this->assertSame([], $client->pauses);
+            $this->assertCount(1, $httpClient->requests);
+        }
+    }
+
+    public function foreignRateLimitResponseProvider(): array
+    {
+        $psr17Factory = new Psr17Factory();
+        $create = function(string $body) use ($psr17Factory): ResponseInterface {
+            return $psr17Factory->createResponse(429)
+                ->withHeader('Retry-After', '1')
+                ->withBody($psr17Factory->createStream($body));
+        };
+
+        return [
+            'empty body' => [$create('')],
+            'html from proxy' => [$create('<html><body>429 Too Many Requests</body></html>')],
+            'json without errors' => [$create(json_encode(['message' => 'Too many concurrent requests.']))],
+            'errors without code' => [$create(json_encode(['errors' => [['message' => 'Too many concurrent requests.']]]))],
+            'errors with other code' => [$create(json_encode(['errors' => [['message' => 'Slow down.', 'code' => 'THROTTLED']]]))],
+            'errors as strings' => [$create(json_encode(['errors' => ['RATE_LIMITED']]))],
+            'errors as object' => [$create(json_encode(['errors' => ['code' => 'RATE_LIMITED']]))],
+            'errors as string' => [$create(json_encode(['errors' => 'RATE_LIMITED']))],
+            'code in other case' => [$create(json_encode(['errors' => [['message' => 'Too many.', 'code' => 'rate_limited']]]))],
+            'json scalar' => [$create(json_encode('RATE_LIMITED'))],
+        ];
+    }
+
+    /**
+     * @dataProvider foreignRateLimitResponseProvider
+     */
+    public function testRateLimitWithoutDepotoAdmissionRejectionIsNotRetried(ResponseInterface $response): void
+    {
+        $logger = new RecordingLogger();
+        $httpClient = new RecordingHttpClient([$response, $this->createProductsResponse()]);
+        $client = $this->getRateLimitTestClient($httpClient, null, true, $logger);
+
+        try {
+            $client->mutation('createProduct', ['name' => 'Product'], ['data' => ['id']]);
+            $this->fail('RateLimitException was not thrown.');
+        }
+        catch(RateLimitException $e) {
+            $this->assertSame(429, $e->getCode());
+            $this->assertSame(1, $e->getRetryAfter());
+            $this->assertSame([], $client->pauses);
+            $this->assertCount(1, $httpClient->requests);
+            $this->assertCount(1, $logger->recordsWithLevel('warning'));
+
+            $infoLogs = $logger->recordsWithLevel('info');
+            $this->assertCount(1, $infoLogs);
+            $this->assertStringContainsString('not retrying', $infoLogs[0]['message']);
+            $this->assertSame(429, $infoLogs[0]['context']['status']);
+        }
+    }
+
+    public function testRateLimitedErrorAmongOtherErrorsIsRetried(): void
+    {
+        $httpClient = new RecordingHttpClient([
+            $this->createJsonResponse(429, ['errors' => [
+                'unexpected',
+                ['message' => 'Something else.'],
+                ['message' => 'API time budget exceeded.', 'code' => 'RATE_LIMITED'],
+            ]])->withHeader('Retry-After', '2'),
+            $this->createProductsResponse(),
+        ]);
+        $client = $this->getRateLimitTestClient($httpClient);
+
+        $client->query('products', [], ['items' => ['id']]);
+
+        $this->assertSame([2000], $client->pauses);
+        $this->assertCount(2, $httpClient->requests);
+    }
+
+    public function testRejectedTokenFollowedByRateLimitIsRetriedWithNewToken(): void
+    {
+        $httpClient = new RecordingHttpClient([
+            $this->createJsonResponse(401, ['message' => 'An authentication exception occurred.']),
+            $this->createJsonResponse(200, ['access_token' => 'new-token', 'refresh_token' => 'new-refresh-token', 'expires_in' => 43200]),
+            $this->createRateLimitResponse('2'),
+            $this->createProductsResponse(),
+        ]);
+        $client = $this->getRateLimitTestClient($httpClient);
+
+        $result = $client->query('products', [], ['items' => ['id']]);
+
+        $this->assertSame([['id' => '1']], $result['items']);
+        $this->assertSame([2000], $client->pauses);
+        $this->assertCount(4, $httpClient->requests);
+        $this->assertSame('https://example.test/oauth/v2/token', (string)$httpClient->requests[1]->getUri());
+        $this->assertSame('Bearer new-token', $httpClient->requests[2]->getHeaderLine('Authorization'));
+        $this->assertSame('Bearer new-token', $httpClient->requests[3]->getHeaderLine('Authorization'));
+        $this->assertSame((string)$httpClient->requests[0]->getBody(), (string)$httpClient->requests[3]->getBody());
+    }
+
+    public function testRateLimitRetriesAreBoundedAcrossTokenRenewal(): void
+    {
+        $httpClient = new RecordingHttpClient([
+            $this->createRateLimitResponse('1'),
+            $this->createJsonResponse(401, ['error' => 'invalid_grant']),
+            $this->createJsonResponse(200, ['access_token' => 'new-token', 'refresh_token' => 'new-refresh-token', 'expires_in' => 43200]),
+            $this->createRateLimitResponse('1'),
+            $this->createRateLimitResponse('1'),
+        ]);
+        $client = $this->getRateLimitTestClient($httpClient);
+
+        try {
+            $client->query('products', [], ['items' => ['id']]);
+            $this->fail('RateLimitException was not thrown.');
+        }
+        catch(RateLimitException $e) {
+            $this->assertSame([1000, 1000], $client->pauses);
+            $this->assertCount(5, $httpClient->requests);
+            $this->assertSame('Bearer test-token', $httpClient->requests[1]->getHeaderLine('Authorization'));
+            $this->assertSame('Bearer new-token', $httpClient->requests[4]->getHeaderLine('Authorization'));
+        }
+    }
+
+    public function testRetriedRequestUsesTokenRenewedInCacheMeanwhile(): void
+    {
+        $cache = new InMemoryCache();
+        $httpClient = new RecordingHttpClient([
+            function() use ($cache, &$client) {
+                $this->setCachedAccessToken($cache, $client, 'other-client-token');
+                return $this->createRateLimitResponse('1');
+            },
+            $this->createProductsResponse(),
+        ]);
+        $client = $this->getRateLimitTestClient($httpClient, $cache);
+
+        $client->query('products', [], ['items' => ['id']]);
+
+        $this->assertCount(2, $httpClient->requests);
+        $this->assertSame('Bearer test-token', $httpClient->requests[0]->getHeaderLine('Authorization'));
+        $this->assertSame('Bearer other-client-token', $httpClient->requests[1]->getHeaderLine('Authorization'));
+    }
+
+    public function testRateLimitedTokenRequestThrowsRateLimitException(): void
+    {
+        $httpClient = new RecordingHttpClient([
+            $this->createRateLimitResponse('1'),
+        ]);
+        $client = $this->getRateLimitTestClient($httpClient, null, false);
+
+        try {
+            $client->authenticate();
+            $this->fail('RateLimitException was not thrown.');
+        }
+        catch(RateLimitException $e) {
+            $this->assertSame(429, $e->getCode());
+            $this->assertSame(1, $e->getRetryAfter());
+            $this->assertSame('https://example.test/oauth/v2/token', (string)$e->getRequest()->getUri());
+            $this->assertSame([], $client->pauses);
+            $this->assertCount(1, $httpClient->requests);
+        }
+    }
+
+    public function testRateLimitedTokenRequestBeforeQueryThrowsRateLimitException(): void
+    {
+        $httpClient = new RecordingHttpClient([
+            $this->createRateLimitResponse('1'),
+        ]);
+        $client = $this->getRateLimitTestClient($httpClient, null, false);
+
+        $this->expectException(RateLimitException::class);
+
+        $client->query('products', [], ['items' => ['id']]);
+    }
+
+    public function testRateLimitedReauthenticationThrowsRateLimitException(): void
+    {
+        $httpClient = new RecordingHttpClient([
+            $this->createJsonResponse(401, ['error' => 'invalid_grant']),
+            $this->createRateLimitResponse('30'),
+        ]);
+        $client = $this->getRateLimitTestClient($httpClient);
+
+        try {
+            $client->query('products', [], ['items' => ['id']]);
+            $this->fail('RateLimitException was not thrown.');
+        }
+        catch(RateLimitException $e) {
+            $this->assertSame(30, $e->getRetryAfter());
+            $this->assertSame('https://example.test/oauth/v2/token', (string)$e->getRequest()->getUri());
+            $this->assertSame([], $client->pauses);
+            $this->assertCount(2, $httpClient->requests);
+        }
+    }
+
+    public function testServerErrorIsNotRetried(): void
+    {
+        $logger = new RecordingLogger();
+        $httpClient = new RecordingHttpClient([
+            $this->createJsonResponse(503, ['message' => 'Service unavailable'])->withHeader('Retry-After', '1'),
+        ]);
+        $client = $this->getRateLimitTestClient($httpClient, null, true, $logger);
+
+        try {
+            $client->query('products', [], ['items' => ['id']]);
+            $this->fail('ServerException was not thrown.');
+        }
+        catch(ServerException $e) {
+            $this->assertNotInstanceOf(RateLimitException::class, $e);
+            $this->assertSame(503, $e->getCode());
+            $this->assertSame([], $client->pauses);
+            $this->assertCount(1, $httpClient->requests);
+            $this->assertCount(1, $logger->recordsWithLevel('error'));
+        }
+    }
+
+    public function testClientErrorIsNotRetried(): void
+    {
+        $httpClient = new RecordingHttpClient([
+            $this->createJsonResponse(400, ['message' => 'Bad request']),
+        ]);
+        $client = $this->getRateLimitTestClient($httpClient);
+
+        try {
+            $client->mutation('createProduct', ['name' => 'Product'], ['data' => ['id']]);
+            $this->fail('AuthenticationException was not thrown.');
+        }
+        catch(AuthenticationException $e) {
+            $this->assertSame(400, $e->getCode());
+            $this->assertSame([], $client->pauses);
+            $this->assertCount(1, $httpClient->requests);
+        }
+    }
+
+    public function errorStatusProvider(): array
+    {
+        $cases = [];
+        foreach(['call', 'batchCall'] as $method) {
+            $cases[$method.', 400'] = [$method, 400, AuthenticationException::class, 'warning'];
+            $cases[$method.', 403'] = [$method, 403, AuthenticationException::class, 'warning'];
+            $cases[$method.', 429'] = [$method, 429, RateLimitException::class, 'warning'];
+            $cases[$method.', 404'] = [$method, 404, ServerException::class, 'error'];
+            $cases[$method.', 500'] = [$method, 500, ServerException::class, 'error'];
+        }
+
+        return $cases;
+    }
+
+    /**
+     * @dataProvider errorStatusProvider
+     */
+    public function testErrorStatusIsThrownAndLogged(string $method, int $statusCode, string $exceptionClass, string $level): void
+    {
+        $logger = new RecordingLogger();
+        $responseBody = json_encode(['errors' => [['message' => 'Refused.', 'code' => 'RATE_LIMITED']]]);
+        $psr17Factory = new Psr17Factory();
+        $httpClient = new RecordingHttpClient([
+            $psr17Factory->createResponse($statusCode)->withBody($psr17Factory->createStream($responseBody)),
+        ]);
+        $client = $this->getRateLimitTestClient($httpClient, null, true, $logger);
+        $client->setRateLimitRetries(0);
+
+        try {
+            if($method == 'call') {
+                $client->query('products', [], ['items' => ['id']]);
+            }
+            else {
+                $client->batchQuery(['productList' => ['method' => 'products', 'body' => ['items' => ['id']]]]);
+            }
+            $this->fail($exceptionClass.' was not thrown.');
+        }
+        catch(ServerException|AuthenticationException $e) {
+            $this->assertSame($exceptionClass, get_class($e));
+            $this->assertSame($statusCode, $e->getCode());
+        }
+
+        $records = array_values(array_filter($logger->records, function(array $record) {
+            return $record['level'] !== 'debug';
+        }));
+        $this->assertCount(1, $records);
+        $this->assertSame($level, $records[0]['level']);
+        $this->assertSame($statusCode.': '.$responseBody, $records[0]['message']);
+        $this->assertSame(['https://example.test/graphql', (string)$httpClient->requests[0]->getBody()], $records[0]['context']);
+    }
+
+    public function tokenResponseProvider(): array
+    {
+        return [
+            'password grant, 200' => ['password', 200],
+            'password grant, 400' => ['password', 400],
+            'password grant, 500' => ['password', 500],
+            'refresh_token grant, 200' => ['refresh_token', 200],
+            'refresh_token grant, 400' => ['refresh_token', 400],
+            'refresh_token grant, 500' => ['refresh_token', 500],
+        ];
+    }
+
+    /**
+     * @dataProvider tokenResponseProvider
+     */
+    public function testTokenEndpointLogsContainNoCredentials(string $grantType, int $statusCode): void
+    {
+        $cache = new InMemoryCache();
+        $logger = new RecordingLogger();
+        $responseData = [
+            200 => ['access_token' => 'issued-access-token', 'refresh_token' => 'issued-refresh-token', 'expires_in' => 43200],
+            400 => ['error' => 'invalid_grant', 'error_description' => 'Invalid username and password combination'],
+            500 => ['message' => 'Internal server error'],
+        ];
+        $httpClient = new RecordingHttpClient([$this->createJsonResponse($statusCode, $responseData[$statusCode])]);
+        $client = $this->getBatchTestClient($httpClient, $cache, false, Client::class, $logger);
+        $client
+            ->setClientSecret('client-secret-value')
+            ->setPassword('password-value');
+        $cache->set('depoto-oauth-'.md5($client->getUsername()), [
+            'access_token' => 'old-access-token',
+            'refresh_token' => 'stored-refresh-token',
+            'expires_time' => time() - 10,
+        ]);
+
+        try {
+            $client->authenticate($grantType);
+            $this->assertSame(200, $statusCode);
+        }
+        catch(ServerException|AuthenticationException $e) {
+            $this->assertNotSame(200, $statusCode);
+        }
+
+        $this->assertCount(1, $httpClient->requests);
+        $requestBody = (string)$httpClient->requests[0]->getBody();
+        $this->assertStringContainsString('client_secret=client-secret-value', $requestBody);
+
+        $this->assertNotEmpty($logger->records);
+        $serializedLog = json_encode($logger->records);
+        foreach(['client-secret-value', 'password-value', 'stored-refresh-token', 'issued-access-token', 'issued-refresh-token'] as $secret) {
+            $this->assertStringNotContainsString($secret, $serializedLog);
+        }
+        $this->assertStringContainsString('client_secret=***', $serializedLog);
+        $this->assertStringContainsString('grant_type='.$grantType, $serializedLog);
+        $this->assertStringContainsString('example.test\/oauth\/v2\/token', $serializedLog);
+    }
+
+    public function testGraphqlErrorIsNotRetried(): void
+    {
+        $httpClient = new RecordingHttpClient([
+            $this->createJsonResponse(200, ['errors' => [['message' => 'Too many concurrent requests.']]]),
+        ]);
+        $client = $this->getRateLimitTestClient($httpClient);
+
+        try {
+            $client->query('products', [], ['items' => ['id']]);
+            $this->fail('ErrorException was not thrown.');
+        }
+        catch(ErrorException $e) {
+            $this->assertSame(200, $e->getCode());
+            $this->assertSame([], $client->pauses);
+            $this->assertCount(1, $httpClient->requests);
+        }
+    }
+}
+
+class PauseRecordingClient extends Client
+{
+    /** @var int[] Requested waits in milliseconds */
+    public array $pauses = [];
+
+    /** Jitter in milliseconds added to each wait */
+    public int $jitter = 0;
+
+    protected function pause(int $milliseconds): void
+    {
+        $this->pauses[] = $milliseconds;
+    }
+
+    protected function getRateLimitJitter(): int
+    {
+        return $this->jitter;
+    }
+}
+
+class WaitExposingClient extends Client
+{
+    public function callPause(int $milliseconds): void
+    {
+        $this->pause($milliseconds);
+    }
+
+    public function callGetRateLimitJitter(): int
+    {
+        return $this->getRateLimitJitter();
+    }
+}
+
+/**
+ * Fake monotonic clock whose every sleep is interrupted halfway, as by a signal, so pause() needs no real waiting.
+ */
+class FakeClockClient extends WaitExposingClient
+{
+    /** Fake monotonic clock in nanoseconds */
+    public int $now = 1000000000;
+
+    /** @var int[] Requested sleeps in microseconds */
+    public array $sleeps = [];
+
+    protected function getMonotonicNanoseconds(): int
+    {
+        return $this->now;
+    }
+
+    protected function sleepMicroseconds(int $microseconds): void
+    {
+        $this->sleeps[] = $microseconds;
+        $this->now += max(1, intdiv($microseconds, 2)) * 1000;
+    }
+}
+
+class RecordingLogger extends AbstractLogger
+{
+    public array $records = [];
+
+    /**
+     * Untyped $message and the void return type keep the declaration compatible with psr/log 1, 2 and 3.
+     */
+    public function log($level, $message, array $context = []): void
+    {
+        $this->records[] = ['level' => $level, 'message' => $message, 'context' => $context];
+    }
+
+    public function recordsWithLevel(string $level): array
+    {
+        return array_values(array_filter($this->records, function(array $record) use ($level) {
+            return $record['level'] === $level;
+        }));
     }
 }
 

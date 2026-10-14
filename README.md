@@ -60,6 +60,84 @@ $result = $depoto->mutation('mutationName',
 
 > Pro testování queries a __procházení kompletního aktuálního schématu__ použijte [GraphQL Explorer / GraphiQL konzoli](https://server1.depoto.cz/graphql/explorer).
 
+### Omezení počtu požadavků (HTTP 429)
+Depoto server omezuje zátěž API pro každého uživatele: počet souběžných požadavků a čas, který server zpracováním požadavků stráví.
+Požadavek nad limit odmítne odpovědí `429 Too Many Requests` s hlavičkou `Retry-After` – počtem sekund, po kterých má smysl požadavek poslat znovu
+(při příliš mnoha souběžných požadavcích 1 s, při vyčerpání časového rozpočtu 2 až 300 s).
+Limit se vyhodnocuje hned po ověření uživatele, ještě než server začne GraphQL požadavek zpracovávat. Odmítnutý požadavek, včetně mutace, tedy vůbec neproběhl a je bezpečné ho poslat znovu.
+
+Server zatím limity jen měří a nevynucuje. Vynucování se nezapne dřív, než s odpovědí 429 budou umět pracovat všechny konektory (viz níže).
+
+#### Co dělá klient
+* `query()`, `mutation()`, `batchQuery()` a `batchMutation()` na odpověď 429 od Depoto serveru počkají `Retry-After` sekund (chybějící, nečitelná nebo nulová hlavička = 1 s) a požadavek pošlou znovu, nejvýše 2× v rámci jednoho volání.
+* Automaticky se opakuje jen odmítnutí Depoto serverem, tj. odpověď 429 s JSON tělem, v jehož poli `errors` je chyba s `"code": "RATE_LIMITED"`
+  (`{"errors":[{"message":"Too many concurrent requests.","code":"RATE_LIMITED"}]}`). U jiné odpovědi 429 (např. od proxy nebo load balanceru
+  před serverem, s jiným či neznámým tělem) nelze vyloučit, že požadavek už proběhl. Klient ji proto neopakuje a rovnou vyhodí `RateLimitException`.
+* K čekání klient přičte náhodný rozptyl 0 až 1000 ms, aby workery odmítnuté ve stejnou chvíli (např. 10–15 replik jednoho konzumenta pod jedním uživatelem)
+  neposlaly požadavky znovu všechny ve stejné sekundě. Rozptyl se do limitu `setMaxRateLimitWait()` nepočítá, porovnává se jen `Retry-After`.
+* Pokud server žádá delší čekání než 5 s (`getMaxRateLimitWait()`), klient nečeká a výjimku vyhodí hned – zbytečně by blokoval worker.
+* Pokud je i poslední odpověď 429, vyhodí `Depoto\Exception\RateLimitException`. Je potomkem `ServerException`, takže ji zachytí i stávající `catch (ServerException $e)`.
+  `getRetryAfter()` vrací počet sekund z hlavičky `Retry-After` (u data převedený na zbývající sekundy), nebo `null`, pokud hlavička chybí či je nečitelná.
+* `authenticate()` (žádost o token) se automaticky neopakuje, na odpověď 429 rovnou vyhodí `RateLimitException`.
+* Každé opakování se zaloguje na úrovni `info`, konečné odmítnutí na úrovni `warning`.
+
+Nastavení (výchozí hodnoty; `ClientFactory` vytváří klienta s výchozími hodnotami, případně je nastavte na vráceném klientovi):
+```php
+$depoto
+    ->setRateLimitRetries(2) // kolikrát nejvýše opakovat jedno volání; 0 = neopakovat, výjimka hned
+    ->setMaxRateLimitWait(5); // nejdelší Retry-After v sekundách, na který klient před opakováním počká; 0 = nikdy nečekat = neopakovat
+```
+
+Nejkratší čekání před opakováním je 1 s, takže `setMaxRateLimitWait(0)` automatické opakování vypne stejně jako `setRateLimitRetries(0)`.
+
+Jedno volání tak může blokovat až `getRateLimitRetries()` × (`getMaxRateLimitWait()` + 1) sekund (výchozí 2 × (5 s + nejvýše 1 s rozptylu) = 12 s), a to u každého volání zvlášť.
+V synchronním kontextu (webhook nebo jiný HTTP controller, API proxy), kde volající čeká na odpověď, nastavte
+`setRateLimitRetries(0)` (výjimka hned), nebo `setMaxRateLimitWait(1)` (klient vyčká jen krátké odmítnutí kvůli souběžným požadavkům),
+a při `RateLimitException` práci odložte do fronty nebo vraťte chybu, místo aby požadavek visel.
+
+#### Co musí udělat aplikace (konektor)
+* `RateLimitException` **nikdy nepolykejte**. Handler zprávy, který výjimku jen zaloguje (`catch (\Exception $e) { $logger->error(...); }`), by zprávu zahodil – např. objednávka by se tiše nenaimportovala.
+  Zprávu je nutné zpracovat znovu později, ideálně až za `getRetryAfter()` sekund, nejméně však za 1 s – `getRetryAfter()` může vrátit 0
+  (hlavička `Retry-After: 0` nebo datum v minulosti) a okamžité opakování by limit jen dál zatěžovalo. `null` (hlavička chybí) nahraďte výchozí prodlevou.
+* Symfony Messenger: výjimku z handleru propusťte ven, nejlépe zabalenou do `RecoverableMessageHandlingException` s prodlevou podle `getRetryAfter()`:
+
+```php
+use Depoto\Exception\RateLimitException;
+use Symfony\Component\Messenger\Exception\RecoverableMessageHandlingException;
+
+try {
+    $result = $depoto->mutation('createOrder', $arguments, ['data' => ['id'], 'errors']);
+}
+catch (RateLimitException $e) {
+    // Zprávu zpracovat znovu za Retry-After sekund (bez hlavičky za 60 s), nejméně za 1 s – Retry-After 0 by znamenal okamžité opakování bez konce.
+    // Náhodný rozptyl 0–1000 ms, aby se workery odmítnuté ve stejnou chvíli nevrátily ve stejné sekundě.
+    // Messenger počítá prodlevu v milisekundách.
+    $retryDelay = max(1, $e->getRetryAfter() ?? 60) * 1000 + mt_rand(0, 1000);
+    throw new RecoverableMessageHandlingException($e->getMessage(), 0, $e, $retryDelay);
+}
+catch (\Exception $e) {
+    $this->logger->error($e->getMessage());
+}
+```
+
+  * Čtvrtý parametr konstruktoru `$retryDelay` (v milisekundách) má `RecoverableMessageHandlingException` od symfony/messenger 7.2
+    (ověřeno ve verzích 7.3.6 a 8.0.14). Ve verzi 6.4 (ověřeno v 6.4.19) ho konstruktor nemá – tam vyhoďte
+    `new RecoverableMessageHandlingException($e->getMessage(), 0, $e)` a prodlevu určí `retry_strategy` transportu.
+  * `RecoverableMessageHandlingException` vynutí opakování bez ohledu na `max_retries` – zpráva se zkouší, dokud neprojde.
+  * Pokud výjimku jen propustíte ven (`throw $e;`), opakuje se podle `retry_strategy` transportu. Při nastavení `max_retries: 3, multiplier: 2`
+    a výchozí prodlevě 1 s jsou to pokusy po 1, 2 a 4 sekundách, což při `Retry-After` až 300 s nemusí stačit a zpráva pak skončí ve failure transportu (nebo se zahodí, pokud žádný není).
+  * Prodlevu (`$retryDelay` i `retry_strategy`) použijí jen transporty, které respektují `DelayStamp` (Doctrine, Redis, AMQP).
+    Google Pub/Sub (`gps://`, petitpress/gps-messenger-bundle) zprávu k opakování znovu neodesílá, jen ji odmítne a Pub/Sub ji doručí znovu
+    podle retry policy subscription – tu nastavte (`minimumBackoff`/`maximumBackoff`) tak, aby pokryla `Retry-After`.
+* Znovu se zpracuje **celá zpráva**, ne jen odmítnutý požadavek. Kroky handleru, které proběhly před výjimkou (např. založení adresy nebo zákazníka
+  před `createOrder`), proběhnou znovu. Handler opakovaný tímto způsobem musí být idempotentní – před založením ověřit, zda záznam už neexistuje,
+  a přeskočit hotové kroky. Idempotence je nutná i proto, že `RateLimitException` z jiné odpovědi 429 než od Depoto serveru (viz výše)
+  nezaručuje, že odmítnutý požadavek neproběhl. U handleru, který idempotentní není, raději zvolte omezený počet opakování (výjimku jen propustit
+  a `retry_strategy` nastavit na prodlevy v řádu `Retry-After`) než neomezené opakování přes `RecoverableMessageHandlingException`.
+* Na `RateLimitException` nereagujte náhradním pokusem s jinými daty (např. „zkusit znovu bez balíků“) – výjimku propusťte ven. Náhradní volání
+  by po uvolnění limitu prošlo a část původních dat by se tiše ztratila.
+* Mimo Messenger (cron, fronta úloh) nechte úlohu selhat a naplánujte ji znovu (za `getRetryAfter()` sekund, nejméně za 1 s), neoznačujte ji jako hotovou.
+
 ### Ouery
 #### Detail produktu
 ```php
