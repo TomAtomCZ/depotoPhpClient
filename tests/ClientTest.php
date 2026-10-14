@@ -604,6 +604,11 @@ class ClientTest extends TestCase
         $this->assertSame(90, $parse('Wednesday, 21-Oct-15 07:29:30 GMT'));
         $this->assertSame(90, $parse('Wed Oct 21 07:29:30 2015'));
         $this->assertSame(0, $parse('Wed, 21 Oct 2015 07:00:00 GMT'));
+        $this->assertSame(11 * 86400, $parse('Sun Nov  1 07:28:00 2015')); // asctime pads a 1-digit day with a space
+        $this->assertSame(2147483647, $parse('99999999999999999999'));
+        $this->assertNull($parse('Mon, 21 Oct 2015 07:29:30 GMT')); // weekday does not match the date
+        $this->assertNull($parse('Monday, 21-Oct-15 07:29:30 GMT'));
+        $this->assertNull($parse('Mon Oct 21 07:29:30 2015'));
         $this->assertNull($parse(null));
         $this->assertNull($parse(''));
         $this->assertNull($parse('-5'));

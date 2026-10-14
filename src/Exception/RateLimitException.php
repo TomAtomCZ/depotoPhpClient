@@ -43,7 +43,7 @@ class RateLimitException extends ServerException
         }
 
         if(preg_match('/^\d+$/', $value)) {
-            return (int)$value;
+            return static::clampSeconds((int)$value);
         }
 
         $date = static::parseHttpDate($value);
@@ -51,7 +51,16 @@ class RateLimitException extends ServerException
             return null;
         }
 
-        return max(0, $date - ($now ?? time()));
+        return static::clampSeconds(max(0, $date - ($now ?? time())));
+    }
+
+    /**
+     * Caps absurdly large values at 2^31 - 1 seconds (cf. RFC 9111, section 1.2.2), so that converting
+     * the result to milliseconds (e.g. a Messenger retry delay) still fits into a 64-bit integer.
+     */
+    protected static function clampSeconds(int $seconds): int
+    {
+        return min($seconds, 2147483647);
     }
 
     protected static function parseHttpDate(string $value): ?int
@@ -69,9 +78,10 @@ class RateLimitException extends ServerException
                 continue;
             }
 
-            // Reject overflowing values such as 32 Oct, which createFromFormat() silently rolls over
-            $errors = DateTime::getLastErrors();
-            if(is_array($errors) && ($errors['warning_count'] > 0 || $errors['error_count'] > 0)) {
+            // createFromFormat() silently rolls over overflowing values such as 32 Oct and moves the date
+            // to the next matching weekday when the day name does not fit the date. Accept the value only
+            // when the parsed date formats back to exactly the same string.
+            if($date->format($format) !== $value) {
                 continue;
             }
 
