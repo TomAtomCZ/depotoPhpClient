@@ -430,12 +430,28 @@ class Client
      */
     protected function pause(int $milliseconds): void
     {
-        $deadline = hrtime(true) + $milliseconds * 1000000;
+        $deadline = $this->getMonotonicNanoseconds() + $milliseconds * 1000000;
 
-        while(($remaining = $deadline - hrtime(true)) > 0) {
+        while(($remaining = $deadline - $this->getMonotonicNanoseconds()) > 0) {
             // Steps of at most 0.5 s, usleep() of 1 s or more is not portable
-            usleep((int)min(ceil($remaining / 1000), 500000));
+            $this->sleepMicroseconds((int)min(ceil($remaining / 1000), 500000));
         }
+    }
+
+    /**
+     * Current value of the monotonic clock in nanoseconds, used by pause(). Tests override it with a fake clock.
+     */
+    protected function getMonotonicNanoseconds(): int
+    {
+        return hrtime(true);
+    }
+
+    /**
+     * Sleeps at most the given microseconds; a signal can end the sleep early. Used by pause(), tests override it.
+     */
+    protected function sleepMicroseconds(int $microseconds): void
+    {
+        usleep($microseconds);
     }
 
     /**

@@ -616,6 +616,32 @@ class ClientTest extends TestCase
         $this->assertLessThan(0.1, microtime(true) - $start);
     }
 
+    public function testPauseSleepsAgainUntilDeadlineWhenSleepEndsEarly(): void
+    {
+        foreach([1, 7, 499, 500, 501, 1000, 1500, 120000, 301000] as $milliseconds) {
+            $client = $this->getBatchTestClient(new RecordingHttpClient([]), new InMemoryCache(), true, FakeClockClient::class);
+            $start = $client->now;
+
+            $client->callPause($milliseconds);
+
+            $elapsed = $client->now - $start;
+            $this->assertGreaterThanOrEqual($milliseconds * 1000000, $elapsed, $milliseconds.' ms');
+            // A sleep cut short is followed by another one, but the wait does not overshoot the deadline
+            $this->assertLessThan($milliseconds * 1000000 + 1000000, $elapsed, $milliseconds.' ms');
+            $this->assertGreaterThan(1, count($client->sleeps), $milliseconds.' ms');
+            foreach($client->sleeps as $microseconds) {
+                $this->assertGreaterThan(0, $microseconds);
+                $this->assertLessThanOrEqual(500000, $microseconds);
+            }
+        }
+
+        foreach([0, -1, -1000] as $milliseconds) {
+            $client = $this->getBatchTestClient(new RecordingHttpClient([]), new InMemoryCache(), true, FakeClockClient::class);
+            $client->callPause($milliseconds);
+            $this->assertSame([], $client->sleeps, $milliseconds.' ms');
+        }
+    }
+
     public function testPauseWaitsUntilDeadlineWhenInterruptedBySignal(): void
     {
         if(!function_exists('pcntl_signal') || !function_exists('pcntl_async_signals') || !function_exists('pcntl_alarm')) {
@@ -1165,6 +1191,29 @@ class WaitExposingClient extends Client
     public function callGetRateLimitJitter(): int
     {
         return $this->getRateLimitJitter();
+    }
+}
+
+/**
+ * Fake monotonic clock whose every sleep is interrupted halfway, as by a signal, so pause() needs no real waiting.
+ */
+class FakeClockClient extends WaitExposingClient
+{
+    /** Fake monotonic clock in nanoseconds */
+    public int $now = 1000000000;
+
+    /** @var int[] Requested sleeps in microseconds */
+    public array $sleeps = [];
+
+    protected function getMonotonicNanoseconds(): int
+    {
+        return $this->now;
+    }
+
+    protected function sleepMicroseconds(int $microseconds): void
+    {
+        $this->sleeps[] = $microseconds;
+        $this->now += max(1, intdiv($microseconds, 2)) * 1000;
     }
 }
 
