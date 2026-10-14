@@ -449,7 +449,7 @@ class ClientTest extends TestCase
         $result = $client->query('products', ['filters' => ['fulltext' => 'secret search']], ['items' => ['id']]);
 
         $this->assertSame([['id' => '1']], $result['items']);
-        $this->assertSame([3], $client->pauses);
+        $this->assertSame([3000], $client->pauses);
         $this->assertCount(2, $httpClient->requests);
         $this->assertSame('Bearer test-token', $httpClient->requests[0]->getHeaderLine('Authorization'));
         $this->assertSame('Bearer test-token', $httpClient->requests[1]->getHeaderLine('Authorization'));
@@ -488,7 +488,7 @@ class ClientTest extends TestCase
             $this->assertSame(429, $e->getResponse()->getStatusCode());
             $this->assertSame('https://example.test/graphql', (string)$e->getRequest()->getUri());
             $this->assertStringContainsString('Too many concurrent requests.', $e->getMessage());
-            $this->assertSame([1, 1], $client->pauses);
+            $this->assertSame([1000, 1000], $client->pauses);
             $this->assertCount(3, $httpClient->requests);
             $this->assertCount(1, $logger->recordsWithLevel('warning'));
             $this->assertCount(0, $logger->recordsWithLevel('error'));
@@ -525,8 +525,124 @@ class ClientTest extends TestCase
 
         $client->query('products', [], ['items' => ['id']]);
 
-        $this->assertSame([120], $client->pauses);
+        $this->assertSame([120000], $client->pauses);
         $this->assertCount(2, $httpClient->requests);
+    }
+
+    public function testJitterIsAddedToRetryAfter(): void
+    {
+        $logger = new RecordingLogger();
+        $httpClient = new RecordingHttpClient([
+            $this->createRateLimitResponse('3'),
+            $this->createRateLimitResponse(null),
+            $this->createProductsResponse(),
+        ]);
+        $client = $this->getRateLimitTestClient($httpClient, null, true, $logger);
+        $client->jitter = 250;
+
+        $client->query('products', [], ['items' => ['id']]);
+
+        $this->assertSame([3250, 1250], $client->pauses);
+        $retryLogs = $logger->recordsWithLevel('info');
+        $this->assertCount(2, $retryLogs);
+        $this->assertSame(3, $retryLogs[0]['context']['wait']);
+        $this->assertSame(250, $retryLogs[0]['context']['jitter']);
+    }
+
+    public function testMaxWaitIsComparedWithRetryAfterWithoutJitter(): void
+    {
+        $httpClient = new RecordingHttpClient([
+            $this->createRateLimitResponse('5'),
+            $this->createProductsResponse(),
+        ]);
+        $client = $this->getRateLimitTestClient($httpClient);
+        $client->jitter = 1000;
+
+        $client->query('products', [], ['items' => ['id']]);
+
+        $this->assertSame(5, $client->getMaxRateLimitWait());
+        $this->assertSame([6000], $client->pauses);
+        $this->assertCount(2, $httpClient->requests);
+    }
+
+    public function testDefaultJitterIsUpToOneSecond(): void
+    {
+        $client = $this->getBatchTestClient(new RecordingHttpClient([]), new InMemoryCache(), true, WaitExposingClient::class);
+
+        $jitters = [];
+        for($i = 0; $i < 200; $i++) {
+            $jitter = $client->callGetRateLimitJitter();
+            $this->assertGreaterThanOrEqual(0, $jitter);
+            $this->assertLessThanOrEqual(1000, $jitter);
+            $jitters[$jitter] = true;
+        }
+
+        // 200 draws from 1001 values: all equal only with negligible probability
+        $this->assertGreaterThan(1, count($jitters));
+    }
+
+    public function testZeroMaxWaitDisablesRetry(): void
+    {
+        $httpClient = new RecordingHttpClient([
+            $this->createRateLimitResponse('1'),
+        ]);
+        $client = $this->getRateLimitTestClient($httpClient);
+        $client->setMaxRateLimitWait(0);
+
+        try {
+            $client->query('products', [], ['items' => ['id']]);
+            $this->fail('RateLimitException was not thrown.');
+        }
+        catch(RateLimitException $e) {
+            $this->assertSame(0, $client->getMaxRateLimitWait());
+            $this->assertSame([], $client->pauses);
+            $this->assertCount(1, $httpClient->requests);
+        }
+    }
+
+    public function testPauseWaitsGivenMilliseconds(): void
+    {
+        $client = $this->getBatchTestClient(new RecordingHttpClient([]), new InMemoryCache(), true, WaitExposingClient::class);
+
+        $start = microtime(true);
+        $client->callPause(150);
+        $elapsed = microtime(true) - $start;
+
+        $this->assertGreaterThanOrEqual(0.15, $elapsed);
+        $this->assertLessThan(1.15, $elapsed);
+
+        $start = microtime(true);
+        $client->callPause(0);
+        $this->assertLessThan(0.1, microtime(true) - $start);
+    }
+
+    public function testPauseWaitsUntilDeadlineWhenInterruptedBySignal(): void
+    {
+        if(!function_exists('pcntl_signal') || !function_exists('pcntl_async_signals') || !function_exists('pcntl_alarm')) {
+            $this->markTestSkipped('ext-pcntl is required to interrupt the wait by a signal.');
+        }
+
+        $client = $this->getBatchTestClient(new RecordingHttpClient([]), new InMemoryCache(), true, WaitExposingClient::class);
+        $signals = 0;
+        $asyncSignals = pcntl_async_signals(true);
+        pcntl_signal(SIGALRM, function() use (&$signals) {
+            $signals++;
+        });
+
+        try {
+            pcntl_alarm(1);
+            $start = microtime(true);
+            $client->callPause(1500);
+            $elapsed = microtime(true) - $start;
+        }
+        finally {
+            pcntl_alarm(0);
+            pcntl_signal(SIGALRM, SIG_DFL);
+            pcntl_async_signals($asyncSignals);
+        }
+
+        $this->assertSame(1, $signals);
+        $this->assertGreaterThanOrEqual(1.5, $elapsed);
     }
 
     public function testRateLimitRetriesCanBeDisabled(): void
@@ -563,7 +679,7 @@ class ClientTest extends TestCase
         }
         catch(RateLimitException $e) {
             $this->assertNull($e->getRetryAfter());
-            $this->assertSame([1, 1], $client->pauses);
+            $this->assertSame([1000, 1000], $client->pauses);
             $this->assertCount(3, $httpClient->requests);
         }
     }
@@ -580,8 +696,8 @@ class ClientTest extends TestCase
 
         $this->assertCount(1, $client->pauses);
         // The second may tick between creating the header and parsing it
-        $this->assertGreaterThanOrEqual(2, $client->pauses[0]);
-        $this->assertLessThanOrEqual(3, $client->pauses[0]);
+        $this->assertGreaterThanOrEqual(2000, $client->pauses[0]);
+        $this->assertLessThanOrEqual(3000, $client->pauses[0]);
         $this->assertCount(2, $httpClient->requests);
     }
 
@@ -629,7 +745,7 @@ class ClientTest extends TestCase
         $result = $client->mutation('createProduct', ['name' => 'Product'], ['data' => ['id']]);
 
         $this->assertSame('5', $result['data']['id']);
-        $this->assertSame([1], $client->pauses);
+        $this->assertSame([1000], $client->pauses);
         $this->assertCount(2, $httpClient->requests);
         $this->assertStringContainsString('mutation', (string)$httpClient->requests[1]->getBody());
         $this->assertSame((string)$httpClient->requests[0]->getBody(), (string)$httpClient->requests[1]->getBody());
@@ -648,7 +764,7 @@ class ClientTest extends TestCase
         ]);
 
         $this->assertSame('5', $result['first']['data']['id']);
-        $this->assertSame([2], $client->pauses);
+        $this->assertSame([2000], $client->pauses);
         $this->assertCount(2, $httpClient->requests);
         $this->assertSame((string)$httpClient->requests[0]->getBody(), (string)$httpClient->requests[1]->getBody());
     }
@@ -735,7 +851,7 @@ class ClientTest extends TestCase
 
         $client->query('products', [], ['items' => ['id']]);
 
-        $this->assertSame([2], $client->pauses);
+        $this->assertSame([2000], $client->pauses);
         $this->assertCount(2, $httpClient->requests);
     }
 
@@ -752,7 +868,7 @@ class ClientTest extends TestCase
         $result = $client->query('products', [], ['items' => ['id']]);
 
         $this->assertSame([['id' => '1']], $result['items']);
-        $this->assertSame([2], $client->pauses);
+        $this->assertSame([2000], $client->pauses);
         $this->assertCount(4, $httpClient->requests);
         $this->assertSame('https://example.test/oauth/v2/token', (string)$httpClient->requests[1]->getUri());
         $this->assertSame('Bearer new-token', $httpClient->requests[2]->getHeaderLine('Authorization'));
@@ -776,7 +892,7 @@ class ClientTest extends TestCase
             $this->fail('RateLimitException was not thrown.');
         }
         catch(RateLimitException $e) {
-            $this->assertSame([1, 1], $client->pauses);
+            $this->assertSame([1000, 1000], $client->pauses);
             $this->assertCount(5, $httpClient->requests);
             $this->assertSame('Bearer test-token', $httpClient->requests[1]->getHeaderLine('Authorization'));
             $this->assertSame('Bearer new-token', $httpClient->requests[4]->getHeaderLine('Authorization'));
@@ -1022,12 +1138,33 @@ class ClientTest extends TestCase
 
 class PauseRecordingClient extends Client
 {
-    /** @var int[] */
+    /** @var int[] Requested waits in milliseconds */
     public array $pauses = [];
 
-    protected function pause(int $seconds): void
+    /** Jitter in milliseconds added to each wait */
+    public int $jitter = 0;
+
+    protected function pause(int $milliseconds): void
     {
-        $this->pauses[] = $seconds;
+        $this->pauses[] = $milliseconds;
+    }
+
+    protected function getRateLimitJitter(): int
+    {
+        return $this->jitter;
+    }
+}
+
+class WaitExposingClient extends Client
+{
+    public function callPause(int $milliseconds): void
+    {
+        $this->pause($milliseconds);
+    }
+
+    public function callGetRateLimitJitter(): int
+    {
+        return $this->getRateLimitJitter();
     }
 }
 

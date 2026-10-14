@@ -73,7 +73,9 @@ Server zatím limity jen měří a nevynucuje. Vynucování se nezapne dřív, n
 * Automaticky se opakuje jen odmítnutí Depoto serverem, tj. odpověď 429 s JSON tělem, v jehož poli `errors` je chyba s `"code": "RATE_LIMITED"`
   (`{"errors":[{"message":"Too many concurrent requests.","code":"RATE_LIMITED"}]}`). U jiné odpovědi 429 (např. od proxy nebo load balanceru
   před serverem, s jiným či neznámým tělem) nelze vyloučit, že požadavek už proběhl. Klient ji proto neopakuje a rovnou vyhodí `RateLimitException`.
-* Pokud server žádá delší čekání než 5 s, klient nečeká a výjimku vyhodí hned – zbytečně by blokoval worker.
+* K čekání klient přičte náhodný rozptyl 0 až 1000 ms, aby workery odmítnuté ve stejnou chvíli (např. 10–15 replik jednoho konzumenta pod jedním uživatelem)
+  neposlaly požadavky znovu všechny ve stejné sekundě. Rozptyl se do limitu `setMaxRateLimitWait()` nepočítá, porovnává se jen `Retry-After`.
+* Pokud server žádá delší čekání než 5 s (`getMaxRateLimitWait()`), klient nečeká a výjimku vyhodí hned – zbytečně by blokoval worker.
 * Pokud je i poslední odpověď 429, vyhodí `Depoto\Exception\RateLimitException`. Je potomkem `ServerException`, takže ji zachytí i stávající `catch (ServerException $e)`.
   `getRetryAfter()` vrací počet sekund z hlavičky `Retry-After` (u data převedený na zbývající sekundy), nebo `null`, pokud hlavička chybí či je nečitelná.
 * `authenticate()` (žádost o token) se automaticky neopakuje, na odpověď 429 rovnou vyhodí `RateLimitException`.
@@ -83,10 +85,12 @@ Nastavení (výchozí hodnoty; `ClientFactory` vytváří klienta s výchozími 
 ```php
 $depoto
     ->setRateLimitRetries(2) // kolikrát nejvýše opakovat jedno volání; 0 = neopakovat, výjimka hned
-    ->setMaxRateLimitWait(5); // nejdelší čekání v sekundách před jedním opakováním
+    ->setMaxRateLimitWait(5); // nejdelší Retry-After v sekundách, na který klient před opakováním počká; 0 = nikdy nečekat = neopakovat
 ```
 
-Jedno volání tak může blokovat až `getRateLimitRetries()` × `getMaxRateLimitWait()` sekund (výchozí 2 × 5 s = 10 s), a to u každého volání zvlášť.
+Nejkratší čekání před opakováním je 1 s, takže `setMaxRateLimitWait(0)` automatické opakování vypne stejně jako `setRateLimitRetries(0)`.
+
+Jedno volání tak může blokovat až `getRateLimitRetries()` × (`getMaxRateLimitWait()` + 1) sekund (výchozí 2 × (5 s + nejvýše 1 s rozptylu) = 12 s), a to u každého volání zvlášť.
 V synchronním kontextu (webhook nebo jiný HTTP controller, API proxy), kde volající čeká na odpověď, nastavte
 `setRateLimitRetries(0)` (výjimka hned), nebo `setMaxRateLimitWait(1)` (klient vyčká jen krátké odmítnutí kvůli souběžným požadavkům),
 a při `RateLimitException` práci odložte do fronty nebo vraťte chybu, místo aby požadavek visel.

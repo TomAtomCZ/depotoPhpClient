@@ -107,6 +107,7 @@ class Client
     /**
      * How many times one call()/batchCall() resends a GraphQL request that Depoto server rejected with 429 Too Many Requests
      * at admission (see sendRateLimitedGraphqlRequest()). 0 disables automatic retry, the 429 is then thrown as RateLimitException at once.
+     * Retries also need setMaxRateLimitWait() of at least 1: the shortest wait before a retry is 1 s, so 0 means no automatic retry either.
      */
     public function setRateLimitRetries(int $rateLimitRetries): self
     {
@@ -122,6 +123,8 @@ class Client
     /**
      * Longest Retry-After in seconds the client waits for before a retry. A 429 asking for a longer wait
      * is thrown as RateLimitException at once, so the caller can postpone the work instead of blocking.
+     * A random jitter of up to 1 s (getRateLimitJitter()) is added to the wait and not counted against this limit.
+     * 0 means never wait, i.e. no automatic retry: the shortest wait is 1 s (a missing or zero Retry-After counts as 1 s).
      */
     public function setMaxRateLimitWait(int $maxRateLimitWait): self
     {
@@ -337,8 +340,8 @@ class Client
 
     /**
      * Sends GraphQL request and, while it is answered with 429 Too Many Requests and $retriesLeft allows,
-     * waits for Retry-After seconds and sends it again. A 429 asking for a longer wait than getMaxRateLimitWait()
-     * is not retried. Each retry rebuilds the request with the access token currently in cache.
+     * waits for Retry-After seconds plus a random jitter (getRateLimitJitter()) and sends it again. A 429 asking for a longer wait
+     * than getMaxRateLimitWait() is not retried. Each retry rebuilds the request with the access token currently in cache.
      *
      * Only Depoto server's admission rejection is resent, see isRateLimitAdmissionRejection(). Resending it is safe,
      * mutations included: Depoto server applies its rate limits at admission, before the request is executed,
@@ -379,9 +382,10 @@ class Client
 
             $retriesLeft--;
             $attempt = $this->rateLimitRetries - $retriesLeft;
+            $jitter = $this->getRateLimitJitter();
             $this->logger->info('429: rate limited, retrying request after Retry-After',
-                ['status' => 429, 'wait' => $wait, 'attempt' => $attempt, 'url' => $url]);
-            $this->pause($wait);
+                ['status' => 429, 'wait' => $wait, 'jitter' => $jitter, 'attempt' => $attempt, 'url' => $url]);
+            $this->pause($wait * 1000 + $jitter);
         }
     }
 
@@ -411,11 +415,27 @@ class Client
     }
 
     /**
-     * Waits before a rate limited request is sent again. Tests override it to avoid sleeping.
+     * Random milliseconds (0 to 1000) added to the Retry-After wait, so that workers refused at the same moment
+     * do not all send their requests again in the same second. Tests override it to get a fixed value.
      */
-    protected function pause(int $seconds): void
+    protected function getRateLimitJitter(): int
     {
-        sleep($seconds);
+        return mt_rand(0, 1000);
+    }
+
+    /**
+     * Waits the given milliseconds before a rate limited request is sent again. Tests override it to avoid sleeping.
+     * A signal can end usleep() early, so the wait continues until the deadline is reached.
+     * The deadline is measured on the monotonic clock, so a change of the system time does not shorten or extend it.
+     */
+    protected function pause(int $milliseconds): void
+    {
+        $deadline = hrtime(true) + $milliseconds * 1000000;
+
+        while(($remaining = $deadline - hrtime(true)) > 0) {
+            // Steps of at most 0.5 s, usleep() of 1 s or more is not portable
+            usleep((int)min(ceil($remaining / 1000), 500000));
+        }
     }
 
     /**
