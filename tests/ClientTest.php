@@ -859,7 +859,10 @@ class RecordingLogger extends AbstractLogger
 {
     public array $records = [];
 
-    public function log($level, $message, array $context = [])
+    /**
+     * Untyped $message and the void return type keep the declaration compatible with psr/log 1, 2 and 3.
+     */
+    public function log($level, $message, array $context = []): void
     {
         $this->records[] = ['level' => $level, 'message' => $message, 'context' => $context];
     }
