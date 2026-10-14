@@ -671,6 +671,74 @@ class ClientTest extends TestCase
         }
     }
 
+    public function foreignRateLimitResponseProvider(): array
+    {
+        $psr17Factory = new Psr17Factory();
+        $create = function(string $body) use ($psr17Factory): ResponseInterface {
+            return $psr17Factory->createResponse(429)
+                ->withHeader('Retry-After', '1')
+                ->withBody($psr17Factory->createStream($body));
+        };
+
+        return [
+            'empty body' => [$create('')],
+            'html from proxy' => [$create('<html><body>429 Too Many Requests</body></html>')],
+            'json without errors' => [$create(json_encode(['message' => 'Too many concurrent requests.']))],
+            'errors without code' => [$create(json_encode(['errors' => [['message' => 'Too many concurrent requests.']]]))],
+            'errors with other code' => [$create(json_encode(['errors' => [['message' => 'Slow down.', 'code' => 'THROTTLED']]]))],
+            'errors as strings' => [$create(json_encode(['errors' => ['RATE_LIMITED']]))],
+            'errors as object' => [$create(json_encode(['errors' => ['code' => 'RATE_LIMITED']]))],
+            'errors as string' => [$create(json_encode(['errors' => 'RATE_LIMITED']))],
+            'code in other case' => [$create(json_encode(['errors' => [['message' => 'Too many.', 'code' => 'rate_limited']]]))],
+            'json scalar' => [$create(json_encode('RATE_LIMITED'))],
+        ];
+    }
+
+    /**
+     * @dataProvider foreignRateLimitResponseProvider
+     */
+    public function testRateLimitWithoutDepotoAdmissionRejectionIsNotRetried(ResponseInterface $response): void
+    {
+        $logger = new RecordingLogger();
+        $httpClient = new RecordingHttpClient([$response, $this->createProductsResponse()]);
+        $client = $this->getRateLimitTestClient($httpClient, null, true, $logger);
+
+        try {
+            $client->mutation('createProduct', ['name' => 'Product'], ['data' => ['id']]);
+            $this->fail('RateLimitException was not thrown.');
+        }
+        catch(RateLimitException $e) {
+            $this->assertSame(429, $e->getCode());
+            $this->assertSame(1, $e->getRetryAfter());
+            $this->assertSame([], $client->pauses);
+            $this->assertCount(1, $httpClient->requests);
+            $this->assertCount(1, $logger->recordsWithLevel('warning'));
+
+            $infoLogs = $logger->recordsWithLevel('info');
+            $this->assertCount(1, $infoLogs);
+            $this->assertStringContainsString('not retrying', $infoLogs[0]['message']);
+            $this->assertSame(429, $infoLogs[0]['context']['status']);
+        }
+    }
+
+    public function testRateLimitedErrorAmongOtherErrorsIsRetried(): void
+    {
+        $httpClient = new RecordingHttpClient([
+            $this->createJsonResponse(429, ['errors' => [
+                'unexpected',
+                ['message' => 'Something else.'],
+                ['message' => 'API time budget exceeded.', 'code' => 'RATE_LIMITED'],
+            ]])->withHeader('Retry-After', '2'),
+            $this->createProductsResponse(),
+        ]);
+        $client = $this->getRateLimitTestClient($httpClient);
+
+        $client->query('products', [], ['items' => ['id']]);
+
+        $this->assertSame([2], $client->pauses);
+        $this->assertCount(2, $httpClient->requests);
+    }
+
     public function testRejectedTokenFollowedByRateLimitIsRetriedWithNewToken(): void
     {
         $httpClient = new RecordingHttpClient([

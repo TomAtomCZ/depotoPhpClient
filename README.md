@@ -69,7 +69,10 @@ Limit se vyhodnocuje hned po ověření uživatele, ještě než server začne G
 Server zatím limity jen měří a nevynucuje. Vynucování se nezapne dřív, než s odpovědí 429 budou umět pracovat všechny konektory (viz níže).
 
 #### Co dělá klient
-* `query()`, `mutation()`, `batchQuery()` a `batchMutation()` na odpověď 429 počkají `Retry-After` sekund (chybějící, nečitelná nebo nulová hlavička = 1 s) a požadavek pošlou znovu, nejvýše 2× v rámci jednoho volání.
+* `query()`, `mutation()`, `batchQuery()` a `batchMutation()` na odpověď 429 od Depoto serveru počkají `Retry-After` sekund (chybějící, nečitelná nebo nulová hlavička = 1 s) a požadavek pošlou znovu, nejvýše 2× v rámci jednoho volání.
+* Automaticky se opakuje jen odmítnutí Depoto serverem, tj. odpověď 429 s JSON tělem, v jehož poli `errors` je chyba s `"code": "RATE_LIMITED"`
+  (`{"errors":[{"message":"Too many concurrent requests.","code":"RATE_LIMITED"}]}`). U jiné odpovědi 429 (např. od proxy nebo load balanceru
+  před serverem, s jiným či neznámým tělem) nelze vyloučit, že požadavek už proběhl. Klient ji proto neopakuje a rovnou vyhodí `RateLimitException`.
 * Pokud server žádá delší čekání než 5 s, klient nečeká a výjimku vyhodí hned – zbytečně by blokoval worker.
 * Pokud je i poslední odpověď 429, vyhodí `Depoto\Exception\RateLimitException`. Je potomkem `ServerException`, takže ji zachytí i stávající `catch (ServerException $e)`.
   `getRetryAfter()` vrací počet sekund z hlavičky `Retry-After` (u data převedený na zbývající sekundy), nebo `null`, pokud hlavička chybí či je nečitelná.

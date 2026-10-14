@@ -105,8 +105,8 @@ class Client
     }
 
     /**
-     * How many times one call()/batchCall() resends a GraphQL request answered with 429 Too Many Requests.
-     * 0 disables automatic retry, the 429 is then thrown as RateLimitException at once.
+     * How many times one call()/batchCall() resends a GraphQL request that Depoto server rejected with 429 Too Many Requests
+     * at admission (see sendRateLimitedGraphqlRequest()). 0 disables automatic retry, the 429 is then thrown as RateLimitException at once.
      */
     public function setRateLimitRetries(int $rateLimitRetries): self
     {
@@ -290,7 +290,8 @@ class Client
      * (e.g. it expired or server clocks differ), a new token is obtained and the request is retried once.
      * The request is safe to retry then, because it was refused before being processed.
      * Other 401 responses are returned as they are.
-     * Both sends resend a 429 response, at most getRateLimitRetries() times in total, see sendRateLimitedGraphqlRequest().
+     * Both sends resend Depoto server's 429 admission rejection, at most getRateLimitRetries() times in total,
+     * see sendRateLimitedGraphqlRequest().
      *
      * @throws ClientExceptionInterface
      * @throws RateLimitException when the token endpoint answers re-authentication with 429
@@ -339,9 +340,10 @@ class Client
      * waits for Retry-After seconds and sends it again. A 429 asking for a longer wait than getMaxRateLimitWait()
      * is not retried. Each retry rebuilds the request with the access token currently in cache.
      *
-     * Resending is safe, mutations included: Depoto server applies its rate limits at admission,
-     * before the request is executed, so a request answered with 429 was not processed at all.
-     * A 429 from the load balancer in front of the server means the request did not reach the server at all.
+     * Only Depoto server's admission rejection is resent, see isRateLimitAdmissionRejection(). Resending it is safe,
+     * mutations included: Depoto server applies its rate limits at admission, before the request is executed,
+     * so a request it answered with 429 was not processed at all. Any other 429 (a proxy or load balancer in front
+     * of the server, an unknown body) gives no such guarantee, so it is not resent and the caller gets RateLimitException.
      *
      * Returns the access token sent in the last request, stores the request and response in lastRequest and lastResponse.
      *
@@ -355,6 +357,12 @@ class Client
             $this->lastResponse = $this->httpClient->sendRequest($this->lastRequest);
 
             if($this->lastResponse->getStatusCode() != 429 || $retriesLeft <= 0) {
+                return $accessToken;
+            }
+
+            if(!$this->isRateLimitAdmissionRejection($this->lastResponse)) {
+                $this->logger->info('429: rate limited, response is not Depoto server admission rejection, not retrying request',
+                    ['status' => 429, 'url' => $url]);
                 return $accessToken;
             }
 
@@ -375,6 +383,31 @@ class Client
                 ['status' => 429, 'wait' => $wait, 'attempt' => $attempt, 'url' => $url]);
             $this->pause($wait);
         }
+    }
+
+    /**
+     * Depoto server's rejection at admission, before any resolver runs: 429 with JSON body
+     * {"errors": [{"message": "...", "code": "RATE_LIMITED"}]}. Only such a response is known to be safe to resend.
+     */
+    protected function isRateLimitAdmissionRejection(ResponseInterface $response): bool
+    {
+        if($response->getStatusCode() != 429) {
+            return false;
+        }
+
+        $res = json_decode((string)$response->getBody(), true);
+        $errors = is_array($res) ? ($res['errors'] ?? null) : null;
+        if(!is_array($errors)) {
+            return false;
+        }
+
+        foreach($errors as $error) {
+            if(is_array($error) && ($error['code'] ?? null) === 'RATE_LIMITED') {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     /**
