@@ -212,18 +212,8 @@ class Client
                 return $res;
             }
         }
-        elseif($statusCode >= 400 && $statusCode <= 403) {
-            $this->logger->warning($statusCode.': '.$responseBody, [$url, $body]);
-            throw new AuthenticationException($this->lastRequest, $this->lastResponse, $statusCode);
-        }
-        elseif($statusCode == 429) {
-            $this->logger->warning($statusCode.': '.$responseBody, [$url, $body]);
-            throw new RateLimitException($this->lastRequest, $this->lastResponse, $statusCode);
-        }
-        else {
-            $this->logger->error($statusCode.': '.$responseBody, [$url, $body]);
-            throw new ServerException($this->lastRequest, $this->lastResponse, $statusCode);
-        }
+
+        throw $this->createGraphqlStatusException($statusCode, $responseBody, $url, $body);
     }
 
     /**
@@ -269,17 +259,29 @@ class Client
 
             return $data;
         }
-        elseif($statusCode >= 400 && $statusCode <= 403) {
+
+        throw $this->createGraphqlStatusException($statusCode, $responseBody, $url, $body);
+    }
+
+    /**
+     * Logs a GraphQL response with status outside 200-399 and returns the exception for it, shared by call() and batchCall():
+     * 400-403 AuthenticationException, 429 RateLimitException (both logged as warning), other ServerException (logged as error).
+     *
+     * @return AuthenticationException|RateLimitException|ServerException
+     */
+    protected function createGraphqlStatusException(int $statusCode, string $responseBody, string $url, string $body): \Depoto\Exception\Exception
+    {
+        if($statusCode >= 400 && $statusCode <= 403) {
             $this->logger->warning($statusCode.': '.$responseBody, [$url, $body]);
-            throw new AuthenticationException($this->lastRequest, $this->lastResponse, $statusCode);
+            return new AuthenticationException($this->lastRequest, $this->lastResponse, $statusCode);
         }
         elseif($statusCode == 429) {
             $this->logger->warning($statusCode.': '.$responseBody, [$url, $body]);
-            throw new RateLimitException($this->lastRequest, $this->lastResponse, $statusCode);
+            return new RateLimitException($this->lastRequest, $this->lastResponse, $statusCode);
         }
         else {
             $this->logger->error($statusCode.': '.$responseBody, [$url, $body]);
-            throw new ServerException($this->lastRequest, $this->lastResponse, $statusCode);
+            return new ServerException($this->lastRequest, $this->lastResponse, $statusCode);
         }
     }
 
@@ -311,11 +313,12 @@ class Client
             try {
                 $this->authenticate();
             }
-            catch(RateLimitException $e) {
-                // A temporary refusal, not a failed authentication: the caller can send the request again later
-                throw $e;
-            }
             catch(AuthenticationException|ServerException $e) {
+                if($e instanceof RateLimitException) {
+                    // A temporary refusal, not a failed authentication: the caller can send the request again later
+                    throw $e;
+                }
+
                 // Caller reports the rejected GraphQL request, not the failed token request
                 $this->lastRequest = $rejectedRequest;
                 $this->lastResponse = $rejectedResponse;

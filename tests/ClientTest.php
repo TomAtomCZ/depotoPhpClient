@@ -825,6 +825,57 @@ class ClientTest extends TestCase
         }
     }
 
+    public function errorStatusProvider(): array
+    {
+        $cases = [];
+        foreach(['call', 'batchCall'] as $method) {
+            $cases[$method.', 400'] = [$method, 400, AuthenticationException::class, 'warning'];
+            $cases[$method.', 403'] = [$method, 403, AuthenticationException::class, 'warning'];
+            $cases[$method.', 429'] = [$method, 429, RateLimitException::class, 'warning'];
+            $cases[$method.', 404'] = [$method, 404, ServerException::class, 'error'];
+            $cases[$method.', 500'] = [$method, 500, ServerException::class, 'error'];
+        }
+
+        return $cases;
+    }
+
+    /**
+     * @dataProvider errorStatusProvider
+     */
+    public function testErrorStatusIsThrownAndLogged(string $method, int $statusCode, string $exceptionClass, string $level): void
+    {
+        $logger = new RecordingLogger();
+        $responseBody = json_encode(['errors' => [['message' => 'Refused.', 'code' => 'RATE_LIMITED']]]);
+        $psr17Factory = new Psr17Factory();
+        $httpClient = new RecordingHttpClient([
+            $psr17Factory->createResponse($statusCode)->withBody($psr17Factory->createStream($responseBody)),
+        ]);
+        $client = $this->getRateLimitTestClient($httpClient, null, true, $logger);
+        $client->setRateLimitRetries(0);
+
+        try {
+            if($method == 'call') {
+                $client->query('products', [], ['items' => ['id']]);
+            }
+            else {
+                $client->batchQuery(['productList' => ['method' => 'products', 'body' => ['items' => ['id']]]]);
+            }
+            $this->fail($exceptionClass.' was not thrown.');
+        }
+        catch(ServerException|AuthenticationException $e) {
+            $this->assertSame($exceptionClass, get_class($e));
+            $this->assertSame($statusCode, $e->getCode());
+        }
+
+        $records = array_values(array_filter($logger->records, function(array $record) {
+            return $record['level'] !== 'debug';
+        }));
+        $this->assertCount(1, $records);
+        $this->assertSame($level, $records[0]['level']);
+        $this->assertSame($statusCode.': '.$responseBody, $records[0]['message']);
+        $this->assertSame(['https://example.test/graphql', (string)$httpClient->requests[0]->getBody()], $records[0]['context']);
+    }
+
     public function tokenResponseProvider(): array
     {
         return [
